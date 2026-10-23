@@ -17,6 +17,16 @@
     <link rel="preload" href="/fonts/RuneScape-Chat-07.ttf" as="font" type="font/ttf" crossorigin />
 
     <script>
+      // Send logged-in users straight to their group. This has to run before any routes
+      // register: redirecting from inside the homepage route leaves the router with no page.
+      (() => {
+        const groupName = localStorage.getItem("groupName");
+        const groupToken = localStorage.getItem("groupToken");
+        if (window.location.pathname === "/" && groupName && groupToken && groupName !== "@EXAMPLE") {
+          window.history.replaceState(null, "", "/group");
+        }
+      })();
+
       window.getTheme = () => {
         let theme = localStorage.getItem("theme");
 
