@@ -220,6 +220,37 @@ pub async fn get_group(client: &Client, group_name: &str, token: &str) -> Result
     Ok(group.try_get(0)?)
 }
 
+// Finds the group a token belongs to, whatever group name the request used. Token hashes are
+// salted with the group's name, so each group's hash is checked in turn.
+pub async fn get_group_by_token(client: &Client, token: &str) -> Result<i64, ApiError> {
+    let rows = client
+        .query(
+            "SELECT group_id, group_name, group_token_hash FROM groupironman.groups",
+            &[],
+        )
+        .await
+        .map_err(ApiError::GetGroupError)?;
+    for row in rows {
+        let group_name: String = row.try_get("group_name")?;
+        let stored_hash: String = row.try_get("group_token_hash")?;
+        if token_hash(token, &group_name) == stored_hash.trim_end() {
+            return Ok(row.try_get("group_id")?);
+        }
+    }
+    Err(ApiError::GroupNotFound)
+}
+
+pub async fn get_group_name(client: &Client, group_id: i64) -> Result<String, ApiError> {
+    let row = client
+        .query_one(
+            "SELECT group_name FROM groupironman.groups WHERE group_id=$1",
+            &[&group_id],
+        )
+        .await
+        .map_err(ApiError::GetGroupError)?;
+    Ok(row.try_get("group_name")?)
+}
+
 fn try_deserialize_json_column<T>(row: &Row, column: &str) -> Result<Option<T>, ApiError>
 where
     T: DeserializeOwned,

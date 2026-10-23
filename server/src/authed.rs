@@ -244,9 +244,15 @@ pub async fn get_skill_data(
     Ok(web::Json(group_skill_data))
 }
 
+// Also returns the group's name, since the site logs in with just a token
 #[get("/am-i-logged-in")]
-pub async fn am_i_logged_in(_auth: Authenticated) -> Result<HttpResponse, Error> {
-    Ok(HttpResponse::Ok().finish())
+pub async fn am_i_logged_in(
+    auth: Authenticated,
+    db_pool: web::Data<Pool>,
+) -> Result<HttpResponse, Error> {
+    let client: Client = db_pool.get().await.map_err(ApiError::PoolError)?;
+    let group_name = db::get_group_name(&client, auth.group_id).await?;
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "group_name": group_name })))
 }
 
 #[get("/am-i-in-group")]

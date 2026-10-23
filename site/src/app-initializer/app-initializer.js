@@ -65,6 +65,24 @@ export class AppInitializer extends BaseElement {
     const firstDataEvent = pubsub.waitUntilNextEvent("get-group-data", false);
     await api.enable(group.groupName, group.groupToken);
     await firstDataEvent;
+    this.refreshGroupName(group);
+  }
+
+  // The server only checks the token, so a login saved with an old or differently capitalised
+  // group name still works. Swap in the real name so the menu shows it.
+  async refreshGroupName(group) {
+    try {
+      const response = await api.amILoggedIn();
+      if (!response.ok) return;
+      const { group_name: name } = await response.json();
+      if (name && name !== group.groupName) {
+        storage.storeGroup(name, group.groupToken);
+        const heading = document.querySelector(".app-navigation__group-name");
+        if (heading) heading.textContent = name;
+      }
+    } catch {
+      // Keep showing the saved name
+    }
   }
 }
 

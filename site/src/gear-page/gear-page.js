@@ -46,9 +46,10 @@ const POOL_BY_ITEM = new Map(
 let itemSlotsPromise;
 function loadItemSlots() {
   if (!itemSlotsPromise) {
-    itemSlotsPromise = fetch("/data/item_slots.json")
-      .then((response) => response.json())
-      .then(({ slots, twoHanded }) => ({ slots, twoHanded: new Set(twoHanded) }));
+    const getJson = (url) => fetch(url).then((response) => response.json());
+    itemSlotsPromise = Promise.all([getJson("/data/item_slots.json"), getJson("/data/item_untradeable.json")]).then(
+      ([{ slots, twoHanded }, untradeable]) => ({ slots, twoHanded: new Set(twoHanded), untradeable: new Set(untradeable) })
+    );
     itemSlotsPromise.catch(() => (itemSlotsPromise = undefined));
   }
   return itemSlotsPromise;
@@ -117,7 +118,7 @@ export class GearPage extends BaseElement {
     this.eventListener(this.searchElement, "input", () => this.renderPicker());
     this.eventListener(window, "beforeunload", this.handleBeforeUnload.bind(this), { passive: false });
     this.contextMenu = this.querySelector(".gear-page__context-menu");
-    this.eventListener(document, "keydown", (event) => event.key === "Escape" && this.closeContextMenu());
+    this.eventListener(document, "keydown", this.handleKeyDown.bind(this));
     this.eventListener(window, "scroll", () => this.closeContextMenu(), { capture: true });
     this.eventListener(document, "click", (event) => !this.contains(event.target) && this.closeContextMenu());
 
@@ -185,12 +186,20 @@ export class GearPage extends BaseElement {
     return setup.members[memberName] || null;
   }
 
-  // [itemId, quantity] in the selected member's selected slot
-  selectedSlotContents() {
-    const loadout = this.loadoutFor(this.selectedMember);
-    if (!loadout || !this.selection) return [0, 0];
-    const [array, index] = this.slotLocation(loadout, this.selection);
+  // [itemId, quantity] in a member's slot
+  slotContents(location) {
+    const loadout = location && this.loadoutFor(location.member);
+    if (!loadout) return [0, 0];
+    const [array, index] = this.slotLocation(loadout, location);
     return [array[index], array[index + 1]];
+  }
+
+  get selectedLocation() {
+    return this.selection ? { member: this.selectedMember, ...this.selection } : null;
+  }
+
+  selectedSlotContents() {
+    return this.slotContents(this.selectedLocation);
   }
 
   slotLocation(loadout, selection) {
@@ -218,19 +227,59 @@ export class GearPage extends BaseElement {
     return pool ? [...pool.forms, ...pool.alsoCounts] : [itemId];
   }
 
-  ownedQuantity(itemId) {
+  // Untradeable items can't be passed between members (not even through group storage), so only
+  // the member holding one can use it. Synapse weapons are untradeable but are left out: they
+  // can be dismantled into a tradeable synapse and made again.
+  isOwnerOnly(itemId) {
+    return !!this.itemSlots?.untradeable?.has(itemId) && !POOL_BY_ITEM.has(itemId);
+  }
+
+  // With a member, an owner-only item counts just what that member holds and uses
+  ownedQuantity(itemId, member = null) {
+    if (member && this.isOwnerOnly(itemId)) return groupData.items[itemId]?.quantities?.[member] || 0;
     return this.limitIds(itemId).reduce((total, id) => total + (groupData.items[id]?.quantity || 0), 0);
   }
 
-  usedQuantity(itemId, used) {
+  usedQuantity(itemId, used, member = null) {
+    if (member && this.isOwnerOnly(itemId)) return this.memberUsedQuantity(itemId, member);
     return this.limitIds(itemId).reduce((total, id) => total + (used.get(id) || 0), 0);
   }
 
-  // How many more of an item can go in the selected slot, counting what's already in it
-  availableQuantity(itemId, used) {
-    const [slotItemId, slotQuantity] = this.selectedSlotContents();
+  memberUsedQuantity(itemId, member) {
+    const loadout = this.loadoutFor(member);
+    let total = 0;
+    for (const array of loadout ? [loadout.equipment, loadout.inventory] : []) {
+      for (let i = 0; i < array.length; i += 2) {
+        if (array[i] === itemId) total += array[i + 1];
+      }
+    }
+    return total;
+  }
+
+  // Members holding an owner-only item
+  owners(itemId) {
+    return this.memberNames.filter((member) => this.ownedQuantity(itemId, member) > 0);
+  }
+
+  // How many more of an item can go in a slot (the selected one by default), counting what's
+  // already in it. With no slot, an owner-only item counts what each owner has left.
+  availableQuantity(itemId, used, location = this.selectedLocation) {
+    if (!location && this.isOwnerOnly(itemId)) {
+      return this.owners(itemId).reduce(
+        (total, member) => total + Math.max(0, this.ownedQuantity(itemId, member) - this.memberUsedQuantity(itemId, member)),
+        0
+      );
+    }
+    const member = location?.member;
+    const [slotItemId, slotQuantity] = this.slotContents(location);
     const freed = this.limitIds(itemId).includes(slotItemId) ? slotQuantity : 0;
-    return this.ownedQuantity(itemId) - this.usedQuantity(itemId, used) + freed;
+    return this.ownedQuantity(itemId, member) - this.usedQuantity(itemId, used, member) + freed;
+  }
+
+  // Whether a member can take an owner-only item from another member's loadout
+  canGive(itemId, quantity, fromMember, toMember) {
+    if (fromMember === toMember || !this.isOwnerOnly(itemId)) return true;
+    return this.ownedQuantity(itemId, toMember) - this.memberUsedQuantity(itemId, toMember) >= quantity;
   }
 
   transformOptions(itemId) {
@@ -273,13 +322,17 @@ export class GearPage extends BaseElement {
     const [targetId, targetQuantity] = [toArray[toIndex], toArray[toIndex + 1]];
 
     let apply;
+    let movedQuantity = quantity;
+    let returned = targetId && targetId !== itemId;
     if (targetId === itemId && this.allowsQuantity(to)) {
+      returned = false;
       apply = () => {
         toArray[toIndex + 1] += quantity;
         fromArray[fromIndex] = fromArray[fromIndex + 1] = 0;
       };
     } else if (quantity > 1 && !this.allowsQuantity(to)) {
       if (targetId) return false;
+      movedQuantity = 1;
       apply = () => {
         toArray[toIndex] = itemId;
         toArray[toIndex + 1] = 1;
@@ -295,6 +348,8 @@ export class GearPage extends BaseElement {
         fromArray[fromIndex + 1] = targetId ? targetQuantity : 0;
       };
     }
+    if (!this.canGive(itemId, movedQuantity, from.member, to.member)) return false;
+    if (returned && !this.canGive(targetId, targetQuantity, to.member, from.member)) return false;
     if (dryRun) return true;
 
     apply();
@@ -357,6 +412,21 @@ export class GearPage extends BaseElement {
     }
 
     this.changed();
+  }
+
+  // Places an item dragged from the picker into any member's slot, replacing what's there like
+  // picking does. Returns whether it's allowed; with dryRun nothing is changed.
+  placeItemAt(location, itemId, dryRun = false) {
+    if (!this.memberNames.includes(location.member) || !this.fitsLocation(itemId, location)) return false;
+    const available = this.availableQuantity(itemId, this.usedQuantities(), location);
+    if (available <= 0) return false;
+    if (dryRun) return true;
+
+    const loadout = this.loadoutFor(location.member, true);
+    const requested = this.allowsQuantity(location) ? parseInt(this.quantityInput.value) || 1 : 1;
+    this.setSlot(loadout, location, itemId, Math.max(1, Math.min(requested, available)));
+    if (location.kind === "equipment") this.applyTwoHandedRule(loadout, location.slot, itemId);
+    return true;
   }
 
   // A two-handed weapon and a shield can't be worn together
@@ -542,6 +612,9 @@ export class GearPage extends BaseElement {
       this.placeItem(parseInt(target.getAttribute("data-item-id")));
     } else if (action === "remove") {
       if (this.selection) this.clearSlot(this.selection);
+    } else if (action === "clear-selection") {
+      this.clearSelection();
+      this.focusSearch();
     } else if (action === "transform") {
       this.transformSlot(parseInt(target.getAttribute("data-item-id")));
     } else if (action === "view-overview") {
@@ -578,6 +651,21 @@ export class GearPage extends BaseElement {
     this.contextMenu.classList.add("open");
   }
 
+  // Escape closes the right-click menu, or else goes back to searching all items
+  handleKeyDown(event) {
+    if (event.key !== "Escape") return;
+    if (this.contextMenu?.classList.contains("open")) {
+      this.closeContextMenu();
+    } else if (this.selection) {
+      this.clearSelection();
+    }
+  }
+
+  clearSelection() {
+    this.selection = null;
+    this.renderLoadoutAndPicker();
+  }
+
   closeContextMenu() {
     this.contextMenu?.classList.remove("open");
   }
@@ -607,11 +695,13 @@ export class GearPage extends BaseElement {
   // ---- Dragging items between slots ----
 
   handleDragStart(event) {
+    const pick = event.target.closest?.(".gear-page__pick");
     const slot = event.target.closest?.('.gear-page__slot[draggable="true"]');
-    if (!slot) return;
+    if (!pick && !slot) return;
     this.closeContextMenu();
-    this.dragSource = this.locationFromElement(slot);
-    slot.classList.add("dragging");
+    // Either an item from the picker list or one already in a slot
+    this.dragSource = pick ? { pickerItemId: parseInt(pick.dataset.itemId) } : this.locationFromElement(slot);
+    (pick || slot).classList.add("dragging");
     event.dataTransfer.effectAllowed = "move";
     // Firefox won't start a drag without some data
     event.dataTransfer.setData("text/plain", "");
@@ -621,7 +711,7 @@ export class GearPage extends BaseElement {
     if (!this.dragSource) return;
     const slot = event.target.closest(".gear-page__slot");
     this.setDropTarget(slot);
-    if (slot && this.moveItem(this.dragSource, this.locationFromElement(slot), true)) {
+    if (slot && this.dropItem(this.dragSource, this.locationFromElement(slot), true)) {
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
       slot.classList.add("drop-ok");
@@ -636,18 +726,26 @@ export class GearPage extends BaseElement {
     this.handleDragEnd();
     if (!slot) return;
     const to = this.locationFromElement(slot);
-    if (this.moveItem(from, to)) {
+    if (!this.dropItem(from, to)) return;
+    // Dropping from an unfocused search keeps it unfocused so more items can be dragged out
+    if (from.pickerItemId === undefined || this.selection) {
       const { member, ...selection } = to;
       this.selectedMember = member;
       this.selection = selection;
-      this.changed();
     }
+    this.changed();
+  }
+
+  dropItem(from, to, dryRun = false) {
+    return from.pickerItemId !== undefined
+      ? this.placeItemAt(to, from.pickerItemId, dryRun)
+      : this.moveItem(from, to, dryRun);
   }
 
   handleDragEnd() {
     this.dragSource = null;
     this.setDropTarget(null);
-    this.querySelectorAll(".gear-page__slot.dragging").forEach((el) => el.classList.remove("dragging"));
+    this.querySelectorAll(".dragging").forEach((el) => el.classList.remove("dragging"));
   }
 
   setDropTarget(slot) {
@@ -801,9 +899,9 @@ export class GearPage extends BaseElement {
         .join("");
   }
 
-  slotHtml(itemId, quantity, used) {
+  slotHtml(itemId, quantity, used, member) {
     if (!itemId) return "";
-    const over = this.usedQuantity(itemId, used) > this.ownedQuantity(itemId);
+    const over = this.usedQuantity(itemId, used, member) > this.ownedQuantity(itemId, member);
     return `<item-box item-id="${itemId}" item-quantity="${quantity}" class="${over ? "gear-page__over" : ""}"></item-box>`;
   }
 
@@ -825,7 +923,7 @@ export class GearPage extends BaseElement {
       return `<div class="equipment-slot ${className} gear-page__slot ${selected ? "selected" : ""}" title="${name}"
         draggable="${itemId ? "true" : "false"}"
         data-action="select-slot" data-member="${member}" data-kind="equipment" data-slot="${slot}">
-        ${itemId ? this.slotHtml(itemId, loadout.equipment[slot * 2 + 1], used) : `<img src="/ui/${emptyImage}" draggable="false" />`}
+        ${itemId ? this.slotHtml(itemId, loadout.equipment[slot * 2 + 1], used, memberName) : `<img src="/ui/${emptyImage}" draggable="false" />`}
       </div>`;
     }).join("");
   }
@@ -839,7 +937,7 @@ export class GearPage extends BaseElement {
       html += `<div class="gear-page__inventory-cell gear-page__slot ${selected ? "selected" : ""}"
         draggable="${loadout.inventory[index * 2] ? "true" : "false"}"
         data-action="select-slot" data-member="${member}" data-kind="inventory" data-index="${index}">
-        ${this.slotHtml(loadout.inventory[index * 2], loadout.inventory[index * 2 + 1], used)}
+        ${this.slotHtml(loadout.inventory[index * 2], loadout.inventory[index * 2 + 1], used, memberName)}
       </div>`;
     }
     return html;
@@ -847,32 +945,35 @@ export class GearPage extends BaseElement {
 
   renderPicker(used = this.usedQuantities()) {
     if (!this.itemSlots) return;
-    this.quantityLabel.classList.toggle("gear-page__hidden", !this.selectionAllowsQuantity());
+    // With no slot selected the quantity applies to items dragged into inventory, weapon or ammo slots
+    this.quantityLabel.classList.toggle("gear-page__hidden", !!this.selection && !this.selectionAllowsQuantity());
 
     if (!this.currentSetup) {
       this.pickerHeadEl.innerHTML = `<h3>No gear setups yet</h3><p>Create one with <b>New setup</b>.</p>`;
       this.pickerListEl.innerHTML = "";
       return;
     }
-    if (!this.selection || !this.selectedMember) {
-      this.pickerHeadEl.innerHTML = `<h3>Choose a slot</h3>
-        <p>Click an equipment or inventory slot, then pick from the group's items. Drag items between slots to move or swap them, and right-click a slot for more options.</p>`;
-      this.pickerListEl.innerHTML = "";
-      return;
+    const focused = !!this.selection && !!this.selectedMember;
+    if (focused) {
+      const [slotItemId, slotQuantity] = this.selectedSlotContents();
+      const slotName =
+        this.selection.kind === "equipment"
+          ? EQUIPMENT_SLOTS.find((x) => x.slot === this.selection.slot).name
+          : `Inventory slot ${this.selection.index + 1}`;
+      this.pickerHeadEl.innerHTML = `<h3>${utility.escapeHtml(this.selectedMember)}: ${slotName}</h3>
+        <p>
+          ${
+            slotItemId
+              ? `${utility.escapeHtml(Item.itemName(slotItemId))}${slotQuantity > 1 ? ` x ${slotQuantity.toLocaleString()}` : ""}
+                 <button class="men-button small" type="button" data-action="remove">Remove</button>`
+              : ""
+          }
+          <button class="men-button small" type="button" data-action="clear-selection">Search all</button>
+        </p>`;
+    } else {
+      this.pickerHeadEl.innerHTML = `<h3>Group items</h3>
+        <p>Drag items onto any slot they fit, or click a slot to pick for it. Drag between slots to move or swap, and right-click a slot for more options.</p>`;
     }
-
-    const [slotItemId, slotQuantity] = this.selectedSlotContents();
-    const slotName =
-      this.selection.kind === "equipment"
-        ? EQUIPMENT_SLOTS.find((x) => x.slot === this.selection.slot).name
-        : `Inventory slot ${this.selection.index + 1}`;
-    this.pickerHeadEl.innerHTML = `<h3>${utility.escapeHtml(this.selectedMember)}: ${slotName}</h3>
-      ${
-        slotItemId
-          ? `<p>${utility.escapeHtml(Item.itemName(slotItemId))}${slotQuantity > 1 ? ` x ${slotQuantity.toLocaleString()}` : ""}
-             <button class="men-button small" type="button" data-action="remove">Remove</button></p>`
-          : ""
-      }`;
 
     const search = (this.searchElement.value || "").trim().toLowerCase();
     // Also offer pool forms the group doesn't hold directly but could make, like a Purging staff from a Scorching bow
@@ -882,7 +983,7 @@ export class GearPage extends BaseElement {
     }
     const candidates = [];
     for (const itemId of itemIds) {
-      if (!this.fitsSelection(itemId)) continue;
+      if (focused && !this.fitsSelection(itemId)) continue;
       const item = { id: itemId, name: Item.itemName(itemId) };
       if (search && !item.name.toLowerCase().includes(search)) continue;
       const available = this.availableQuantity(itemId, used);
@@ -892,9 +993,9 @@ export class GearPage extends BaseElement {
     candidates.sort((a, b) => a.item.name.localeCompare(b.item.name));
 
     if (candidates.length === 0) {
-      this.pickerListEl.innerHTML = `<p class="gear-page__empty">No available group items fit this slot${
-        search ? " and match the search" : ""
-      }.</p>`;
+      this.pickerListEl.innerHTML = focused
+        ? `<p class="gear-page__empty">No available group items fit this slot${search ? " and match the search" : ""}.</p>`
+        : `<p class="gear-page__empty">No available group items${search ? " match the search" : ""}.</p>`;
       return;
     }
 
@@ -902,12 +1003,22 @@ export class GearPage extends BaseElement {
       candidates
         .slice(0, MAX_PICKER_RESULTS)
         .map(
-          ({ item, available }) => `<button class="gear-page__pick rsbackground-hover" type="button"
-            data-action="pick" data-item-id="${item.id}">
-            <img src="${Item.imageUrl(item.id, 1)}" loading="lazy" />
-            <span class="gear-page__pick-name">${utility.escapeHtml(item.name)}</span>
-            <span class="gear-page__pick-available">${available.toLocaleString()} available</span>
-          </button>`
+          ({ item, available }) => {
+            // In the unfocused list, say where wearable items go
+            const slot = focused ? null : EQUIPMENT_SLOTS.find((x) => x.slot === this.itemSlots.slots[item.id]);
+            return `<button class="gear-page__pick rsbackground-hover" type="button" draggable="true"
+              data-action="pick" data-item-id="${item.id}" ${focused ? "" : `title="Drag onto a slot"`}>
+              <img src="${Item.imageUrl(item.id, 1)}" loading="lazy" draggable="false" />
+              <span class="gear-page__pick-name">${utility.escapeHtml(item.name)}</span>
+              ${slot ? `<span class="gear-page__pick-slot">${slot.name}</span>` : ""}
+              ${
+                !focused && this.isOwnerOnly(item.id)
+                  ? `<span class="gear-page__pick-slot" title="Untradeable, only its owner can use it">${utility.escapeHtml(this.owners(item.id).join(", "))} only</span>`
+                  : ""
+              }
+              <span class="gear-page__pick-available">${available.toLocaleString()} available</span>
+            </button>`;
+          }
         )
         .join("") +
       (candidates.length > MAX_PICKER_RESULTS
@@ -920,6 +1031,18 @@ export class GearPage extends BaseElement {
     const warnings = [];
     const checkedPools = new Set();
     for (const itemId of used.keys()) {
+      if (this.isOwnerOnly(itemId)) {
+        for (const member of this.memberNames) {
+          const quantity = this.memberUsedQuantity(itemId, member);
+          const owned = this.ownedQuantity(itemId, member);
+          if (quantity > owned) {
+            warnings.push(
+              `${utility.escapeHtml(Item.itemName(itemId))} (untradeable): ${utility.escapeHtml(member)}'s loadout uses ${quantity.toLocaleString()}, ${utility.escapeHtml(member)} has ${owned.toLocaleString()}`
+            );
+          }
+        }
+        continue;
+      }
       const pool = POOL_BY_ITEM.get(itemId);
       if (pool && checkedPools.has(pool)) continue;
       if (pool) checkedPools.add(pool);

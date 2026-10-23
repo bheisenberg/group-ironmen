@@ -20,8 +20,6 @@ export class LoginPage extends BaseElement {
         return "This field is required.";
       }
     };
-    this.name = this.querySelector(".login__name");
-    this.name.validators = [fieldRequiredValidator];
     this.token = this.querySelector(".login__token");
     this.token.validators = [fieldRequiredValidator];
     this.loginButton = this.querySelector(".login__button");
@@ -34,20 +32,22 @@ export class LoginPage extends BaseElement {
   }
 
   async login() {
-    if (!this.name.valid || !this.token.valid) return;
+    if (!this.token.valid) return;
     try {
       this.error.innerHTML = "";
       this.loginButton.disabled = true;
-      const name = this.name.value;
       const token = this.token.value;
-      api.setCredentials(name, token);
+      // The server identifies the group by its token alone and ignores the name in the URL,
+      // so log in with a placeholder and keep the real name it sends back
+      api.setCredentials("group", token);
       const response = await api.amILoggedIn();
       if (response.ok) {
+        const { group_name: name } = await response.json();
         storage.storeGroup(name, token);
         window.history.pushState("", "", "/group");
       } else {
         if (response.status === 401) {
-          this.error.innerHTML = "Group name or token is incorrect";
+          this.error.innerHTML = "Group token is incorrect";
         } else {
           const body = await response.text();
           this.error.innerHTML = `Unable to login ${body}`;

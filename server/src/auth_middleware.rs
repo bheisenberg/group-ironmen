@@ -20,19 +20,14 @@ const AUTH_CACHE_TTL: Duration = Duration::from_secs(300);
 const AUTH_CACHE_MAX_ENTRIES: usize = 10_000;
 const AUTH_CACHE_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
-#[derive(Hash, Eq, PartialEq)]
-struct AuthenticationCacheKey {
-    group_name: String,
-    token_hash: String,
-}
-
 struct CachedAuthentication {
     group_id: i64,
     expires_at: Instant,
 }
 
 struct AuthenticationCacheInner {
-    entries: HashMap<AuthenticationCacheKey, CachedAuthentication>,
+    // Keyed by token hash; the group name in the request isn't part of authentication
+    entries: HashMap<String, CachedAuthentication>,
     last_sweep: Instant,
 }
 
@@ -50,20 +45,16 @@ impl AuthenticationCache {
         }
     }
 
-    fn get(&self, group_name: &str, token_hash: &str) -> Option<i64> {
+    fn get(&self, token_hash: &str) -> Option<i64> {
         let inner = self.inner.read().ok()?;
-        let key = AuthenticationCacheKey {
-            group_name: group_name.to_owned(),
-            token_hash: token_hash.to_owned(),
-        };
         inner
             .entries
-            .get(&key)
+            .get(token_hash)
             .filter(|entry| entry.expires_at > Instant::now())
             .map(|entry| entry.group_id)
     }
 
-    fn insert(&self, group_name: &str, token_hash: String, group_id: i64) {
+    fn insert(&self, token_hash: String, group_id: i64) {
         let Ok(mut inner) = self.inner.write() else {
             return;
         };
@@ -76,10 +67,7 @@ impl AuthenticationCache {
             return;
         }
         inner.entries.insert(
-            AuthenticationCacheKey {
-                group_name: group_name.to_owned(),
-                token_hash,
-            },
+            token_hash,
             CachedAuthentication {
                 group_id,
                 expires_at: now + AUTH_CACHE_TTL,
@@ -155,7 +143,6 @@ pub struct AuthenticateMiddleware<S> {
 /// Returns Ok(group_id) on success, or an error response to return directly.
 async fn authenticate_via_db(
     req: &ServiceRequest,
-    group_name: &str,
     token: &str,
     token_hash: &str,
     cache: &AuthenticationCache,
@@ -168,11 +155,11 @@ async fn authenticate_via_db(
         .await
         .map_err(|_| actix_web::error::ErrorInternalServerError(""))?;
 
-    let group_id = db::get_group(&client, group_name, token)
+    let group_id = db::get_group_by_token(&client, token)
         .await
         .map_err(|_| actix_web::error::ErrorUnauthorized(""))?;
 
-    cache.insert(group_name, token_hash.to_owned(), group_id);
+    cache.insert(token_hash.to_owned(), group_id);
     Ok(group_id)
 }
 
@@ -223,10 +210,12 @@ where
                     }
                 };
 
-                let token_hash = crate::crypto::token_hash(token, group_name);
-                let group_id = match cache.get(group_name, &token_hash) {
+                // This server tracks one group, so the token alone identifies it. The group name in
+                // the URL is ignored, so any name (or capitalisation) the plugin or site sends works.
+                let token_hash = crate::crypto::token_hash(token, "");
+                let group_id = match cache.get(&token_hash) {
                     Some(group_id) => group_id,
-                    None => match authenticate_via_db(&req, group_name, token, &token_hash, &cache)
+                    None => match authenticate_via_db(&req, token, &token_hash, &cache)
                         .await
                     {
                         Ok(group_id) => group_id,
@@ -251,12 +240,11 @@ mod tests {
     use super::AuthenticationCache;
 
     #[test]
-    fn caches_successful_authentication_by_group_and_token_hash() {
+    fn caches_successful_authentication_by_token_hash() {
         let cache = AuthenticationCache::new();
-        cache.insert("ironmen", "valid-token-hash".to_owned(), 42);
+        cache.insert("valid-token-hash".to_owned(), 42);
 
-        assert_eq!(cache.get("ironmen", "valid-token-hash"), Some(42));
-        assert_eq!(cache.get("ironmen", "other-token-hash"), None);
-        assert_eq!(cache.get("other-group", "valid-token-hash"), None);
+        assert_eq!(cache.get("valid-token-hash"), Some(42));
+        assert_eq!(cache.get("other-token-hash"), None);
     }
 }

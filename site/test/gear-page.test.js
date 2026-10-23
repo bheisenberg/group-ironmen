@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GearPage } from "../src/gear-page/gear-page";
 import { groupData } from "../src/data/group-data";
 import { api } from "../src/data/api";
+import { Item } from "../src/data/item";
 
 const WHIP = 4151;
 const GODSWORD = 11802;
@@ -39,6 +40,7 @@ function makePage({ owned, members = {} }) {
   page.itemSlots = {
     slots: { [WHIP]: 3, [GODSWORD]: 3, [DEFENDER]: 5, [ARROW]: 13, [PURGING_STAFF]: 3, [SCORCHING_BOW]: 3 },
     twoHanded: new Set([GODSWORD, SCORCHING_BOW]),
+    untradeable: new Set(),
   };
   page.setups = [{ id: 1, name: "ToB", version: 1, members }];
   page.currentSetupId = 1;
@@ -274,6 +276,97 @@ describe("gear page", () => {
       expect(slot(page, "Alice", "equipment", 3)).toEqual([GODSWORD, 1]);
       expect(slot(page, "Alice", "equipment", 5)).toEqual([0, 0]);
       expect(slot(page, "Alice", "inventory", 6)).toEqual([DEFENDER, 1]);
+    });
+  });
+
+  describe("dragging from an unfocused search", () => {
+    const at = (member, kind, n) => (kind === "equipment" ? { member, kind, slot: n } : { member, kind, index: n });
+
+    it("places an item in any member's slot it fits, within what's available", () => {
+      const page = makePage({ owned: { [WHIP]: 1 }, members: { Alice: loadoutWith({ equipment: { 3: [WHIP, 1] } }) } });
+      page.selection = null;
+
+      expect(page.placeItemAt(at("Bob", "equipment", 0), WHIP, true)).toBe(false); // doesn't fit the head
+      expect(page.placeItemAt(at("Bob", "equipment", 3), WHIP, true)).toBe(false); // Alice has the only whip
+      expect(page.placeItemAt(at("Alice", "inventory", 0), WHIP)).toBe(false);
+      expect(page.placeItemAt(at("Alice", "equipment", 3), WHIP)).toBe(true); // replacing her own whip is fine
+      expect(page.selection).toBe(null);
+    });
+
+    it("uses the quantity box for slots that take a quantity, capped at what's available", () => {
+      const page = makePage({ owned: { [SHARK]: 10, [DEFENDER]: 2 } });
+      page.quantityInput.value = "25";
+      expect(page.placeItemAt(at("Bob", "inventory", 3), SHARK)).toBe(true);
+      expect(page.loadoutFor("Bob").inventory.slice(6, 8)).toEqual([SHARK, 10]);
+      expect(page.placeItemAt(at("Bob", "equipment", 5), DEFENDER)).toBe(true);
+      expect(page.loadoutFor("Bob").equipment.slice(10, 12)).toEqual([DEFENDER, 1]);
+    });
+
+    it("applies the two-handed rule", () => {
+      const page = makePage({ owned: { [GODSWORD]: 1 }, members: { Bob: loadoutWith({ equipment: { 5: [DEFENDER, 1] } }) } });
+      expect(page.placeItemAt(at("Bob", "equipment", 3), GODSWORD)).toBe(true);
+      expect(page.loadoutFor("Bob").equipment.slice(10, 12)).toEqual([0, 0]);
+    });
+
+    it("routes picker drags and slot drags through dropItem", () => {
+      const page = makePage({ owned: { [SHARK]: 5 }, members: { Alice: loadoutWith({ inventory: { 0: [SHARK, 2] } }) } });
+      page.quantityInput.value = "3";
+      expect(page.dropItem({ pickerItemId: SHARK }, at("Bob", "inventory", 0))).toBe(true);
+      expect(page.dropItem(at("Alice", "inventory", 0), at("Bob", "inventory", 1))).toBe(true);
+      expect(page.loadoutFor("Bob").inventory.slice(0, 4)).toEqual([SHARK, 3, SHARK, 2]);
+    });
+  });
+
+  describe("untradeable items", () => {
+    const FIRE_CAPE = 6570;
+    const at = (member, kind, n) => (kind === "equipment" ? { member, kind, slot: n } : { member, kind, index: n });
+    // Alice holds 1 fire cape, Bob holds 2 synapse weapons (untradeable, but shared through the synapse)
+    const untradeablePage = (members = {}) => {
+      const page = makePage({ owned: {}, members });
+      page.itemSlots.slots[FIRE_CAPE] = 1;
+      page.itemSlots.untradeable = new Set([FIRE_CAPE, PURGING_STAFF, SCORCHING_BOW]);
+      groupData.items = {
+        [FIRE_CAPE]: { id: FIRE_CAPE, name: "Fire cape", quantity: 1, quantities: { Alice: 1, Bob: 0 } },
+        [SCORCHING_BOW]: { id: SCORCHING_BOW, name: "Scorching bow", quantity: 2, quantities: { Alice: 0, Bob: 2 } },
+      };
+      return page;
+    };
+
+    it("can only be picked by the member who holds it", () => {
+      const page = untradeablePage();
+      expect(page.availableQuantity(FIRE_CAPE, page.usedQuantities(), at("Alice", "equipment", 1))).toBe(1);
+      expect(page.availableQuantity(FIRE_CAPE, page.usedQuantities(), at("Bob", "equipment", 1))).toBe(0);
+      expect(page.placeItemAt(at("Bob", "equipment", 1), FIRE_CAPE)).toBe(false);
+      expect(page.placeItemAt(at("Alice", "equipment", 1), FIRE_CAPE)).toBe(true);
+      // the unfocused list counts what owners have left
+      expect(page.availableQuantity(FIRE_CAPE, page.usedQuantities(), null)).toBe(0);
+      expect(page.owners(FIRE_CAPE)).toEqual(["Alice"]);
+    });
+
+    it("can't be dragged to another member, or swapped onto them", () => {
+      const page = untradeablePage({
+        Alice: loadoutWith({ equipment: { 1: [FIRE_CAPE, 1] } }),
+        Bob: loadoutWith({ inventory: { 0: [SHARK, 1] } }),
+      });
+      expect(page.moveItem(at("Alice", "equipment", 1), at("Bob", "inventory", 5))).toBe(false);
+      expect(page.moveItem(at("Bob", "inventory", 0), at("Alice", "equipment", 1), true)).toBe(false); // shark doesn't fit
+      expect(page.moveItem(at("Alice", "equipment", 1), at("Alice", "inventory", 3))).toBe(true); // own inventory is fine
+      expect(page.moveItem(at("Bob", "inventory", 0), at("Alice", "inventory", 3))).toBe(false); // swap would hand Bob the cape
+    });
+
+    it("leaves synapse weapons shared between members", () => {
+      const page = untradeablePage();
+      expect(page.isOwnerOnly(SCORCHING_BOW)).toBe(false);
+      expect(page.placeItemAt(at("Alice", "equipment", 3), PURGING_STAFF)).toBe(true);
+    });
+
+    it("warns per member when a loadout uses an untradeable item its member doesn't hold", () => {
+      const page = untradeablePage({ Bob: loadoutWith({ equipment: { 1: [FIRE_CAPE, 1] } }) });
+      page.warningsEl = document.createElement("div");
+      Item.itemDetails = { [FIRE_CAPE]: { name: "Fire cape" } };
+      page.renderWarnings(page.usedQuantities());
+      expect(page.warningsEl.textContent).toContain("Fire cape (untradeable): Bob's loadout uses 1, Bob has 0");
+      expect(page.slotHtml(FIRE_CAPE, 1, page.usedQuantities(), "Bob")).toContain("gear-page__over");
     });
   });
 

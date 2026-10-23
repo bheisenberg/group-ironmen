@@ -33,6 +33,7 @@ pub enum ApiError {
     LoadoutValidationError(String),
     LoadoutNotFound,
     LoadoutVersionConflict,
+    GroupNotFound,
 }
 impl std::error::Error for ApiError {}
 fn handle_pg_error(err: &tokio_postgres::error::Error, name: &str) -> HttpResponse {
@@ -84,6 +85,7 @@ impl ResponseError for ApiError {
                 HttpResponse::BadRequest().body(reason.clone())
             }
             ApiError::LoadoutNotFound => HttpResponse::NotFound().body("Loadout setup not found"),
+            ApiError::GroupNotFound => HttpResponse::Unauthorized().finish(),
             ApiError::LoadoutVersionConflict => HttpResponse::Conflict()
                 .body("Loadout setup was changed by someone else; reload and try again"),
         }
