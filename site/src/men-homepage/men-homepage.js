@@ -12,6 +12,11 @@ export class MenHomepage extends BaseElement {
 
   connectedCallback() {
     super.connectedCallback();
+    if (this.hasLogin) {
+      // replaceState so the back button doesn't bounce back to the homepage
+      window.history.replaceState("", "", "/group");
+      return;
+    }
     this.render();
   }
 
