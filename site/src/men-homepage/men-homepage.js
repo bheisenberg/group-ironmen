@@ -23,6 +23,10 @@ export class MenHomepage extends BaseElement {
     const group = storage.getGroup();
     return group && group.groupName && group.groupToken && group.groupName !== "@EXAMPLE";
   }
+
+  get showDemo() {
+    return new URLSearchParams(window.location.search).has("demo");
+  }
 }
 
 customElements.define("men-homepage", MenHomepage);
