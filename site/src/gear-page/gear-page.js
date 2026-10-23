@@ -97,8 +97,8 @@ export class GearPage extends BaseElement {
       this.setups = [];
       this.currentSetupId = null;
       this.selectedMember = null;
-      // "edit" shows one member's loadout with the item picker, "overview" shows every member side by side
-      this.view = "edit";
+      // "overview" shows every member side by side, "edit" shows just the selected member's loadout
+      this.view = "overview";
       this.dirtySetupIds = new Set();
     }
     this.stateGroupName = api.groupName;
@@ -442,7 +442,8 @@ export class GearPage extends BaseElement {
       this.createSetup();
     } else if (action === "delete-setup") {
       this.deleteSetup();
-    } else if (action === "select-member") {
+    } else if (action === "select-member" || action === "edit-member") {
+      this.view = "edit";
       this.selectedMember = target.getAttribute("data-member");
       this.selection = null;
       this.renderMembers();
@@ -458,12 +459,8 @@ export class GearPage extends BaseElement {
       if (this.selection) this.clearSlot(this.selection);
     } else if (action === "transform") {
       this.transformSlot(parseInt(target.getAttribute("data-item-id")));
-    } else if (action === "view-edit" || action === "view-overview") {
-      this.view = action === "view-edit" ? "edit" : "overview";
-      this.renderLoadoutAndPicker();
-    } else if (action === "edit-member") {
-      this.view = "edit";
-      this.selectedMember = target.getAttribute("data-member");
+    } else if (action === "view-overview") {
+      this.view = "overview";
       this.selection = null;
       this.renderMembers();
       this.renderLoadoutAndPicker();
@@ -590,8 +587,6 @@ export class GearPage extends BaseElement {
     const used = this.usedQuantities();
     const overview = this.view === "overview";
     this.classList.toggle("gear-page--overview", overview);
-    this.querySelector('[data-action="view-edit"]').classList.toggle("active", !overview);
-    this.querySelector('[data-action="view-overview"]').classList.toggle("active", overview);
     if (overview) {
       this.renderOverview(used);
     } else {
@@ -646,17 +641,23 @@ export class GearPage extends BaseElement {
     this.classList.toggle("gear-page--empty", !setup);
   }
 
+  // Overview comes first, then a button per member that opens their loadout on its own
   renderMembers() {
     const setup = this.currentSetup;
-    this.membersEl.innerHTML = this.memberNames
-      .map((name) => {
-        const hasLoadout = setup?.members[name] && !isEmptyLoadout(setup.members[name]);
-        return `<button class="men-button small ${name === this.selectedMember ? "active" : ""}" type="button"
+    const overview = this.view === "overview";
+    const overviewButton = `<button class="men-button small ${overview ? "active" : ""}" type="button"
+      data-action="view-overview">Overview</button>`;
+    this.membersEl.innerHTML =
+      overviewButton +
+      this.memberNames
+        .map((name) => {
+          const hasLoadout = setup?.members[name] && !isEmptyLoadout(setup.members[name]);
+          return `<button class="men-button small ${!overview && name === this.selectedMember ? "active" : ""}" type="button"
           data-action="select-member" data-member="${utility.escapeHtml(name)}">${utility.escapeHtml(name)}${
-          hasLoadout ? " *" : ""
-        }</button>`;
-      })
-      .join("");
+            hasLoadout ? " *" : ""
+          }</button>`;
+        })
+        .join("");
   }
 
   slotHtml(itemId, quantity, used) {

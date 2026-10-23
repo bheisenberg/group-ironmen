@@ -214,7 +214,6 @@
   display: flex;
 }
 
-.gear-page--overview .gear-page__members,
 .gear-page--overview .gear-page__loadout {
   display: none;
 }
