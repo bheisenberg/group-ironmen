@@ -8,7 +8,7 @@ export class InventoryPager extends BaseElement {
     this.pageLimit = 200;
     this.currentPage = 1;
     this.numberOfItems = 0;
-    this.compare = this.compareOnQuantity.bind(this);
+    this.compare = this.compareOnGePrice.bind(this);
   }
 
   connectedCallback() {

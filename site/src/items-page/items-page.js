@@ -1,4 +1,5 @@
 import { BaseElement } from "../base-element/base-element";
+import { utility } from "../utility";
 
 export class ItemsPage extends BaseElement {
   constructor() {
@@ -23,7 +24,7 @@ export class ItemsPage extends BaseElement {
     let playerOptions = `<option value="@ALL">All Players</option>`;
     for (const member of members) {
       playerOptions += `<option value="${member.name}" ${member.name === selected ? "selected" : ""}>${
-        member.name
+        utility.displayName(member.name)
       }</option>`;
     }
 

@@ -1,4 +1,5 @@
 import { BaseElement } from "../base-element/base-element";
+import { utility } from "../utility";
 
 export class InventoryItem extends BaseElement {
   constructor() {
@@ -66,7 +67,7 @@ export class InventoryItem extends BaseElement {
     const totalQuantity = this.quantity;
     const quantityPercent = Math.round((quantity / totalQuantity) * 100);
     return `
-<span class="${quantity === 0 ? "inventory-item__no-quantity" : ""}">${playerName}</span>
+<span class="${quantity === 0 ? "inventory-item__no-quantity" : ""}">${utility.displayName(playerName)}</span>
 <span>${quantity.toLocaleString()}</span>
 <div class="inventory-item__quantity-bar"
      style="transform: scaleX(${quantityPercent}%); background: hsl(${quantityPercent}, 100%, 40%);">

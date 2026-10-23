@@ -47,6 +47,10 @@ class Utility {
     return this.formatShortQuantity(quantity);
   }
 
+  displayName(memberName) {
+    return memberName === "@SHARED" ? "Group Storage" : memberName;
+  }
+
   removeArticles(str) {
     const articles = ["a", "the", "an"];
     const words = str.split(" ");
