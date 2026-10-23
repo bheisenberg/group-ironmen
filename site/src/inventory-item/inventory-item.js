@@ -56,7 +56,6 @@ export class InventoryItem extends BaseElement {
     }
 
     const badge = this.isPotionStorage ? '<span class="inventory-item__badge">Potion storage</span>' : "";
-    const quantityLabel = this.isPotionStorage ? "Doses" : "Quantity";
 
     return `{{inventory-item.html}}`;
   }

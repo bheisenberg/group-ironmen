@@ -26,6 +26,40 @@ export class Item {
     return `/icons/items/${imageId}.webp`;
   }
 
+  // For a dosed potion like "Prayer potion(1)", returns the highest dose variant that exists
+  // ("Prayer potion(4)", or "(2)" for barbarian mixes) along with the dose counts of both.
+  // Returns null for items without a dose suffix, e.g. unfinished potions.
+  static maxDoseVariant(itemId) {
+    Item.maxDoseVariantCache ??= new Map();
+    if (Item.maxDoseVariantCache.has(itemId)) return Item.maxDoseVariantCache.get(itemId);
+
+    let result = null;
+    const name = Item.itemDetails[itemId]?.name;
+    const match = name?.match(/\((\d)\)$/);
+    if (match) {
+      if (!Item.idsByName) {
+        Item.idsByName = new Map();
+        for (const [id, details] of Object.entries(Item.itemDetails)) {
+          if (!Item.idsByName.has(details.name)) Item.idsByName.set(details.name, []);
+          Item.idsByName.get(details.name).push(parseInt(id));
+        }
+      }
+
+      for (let doses = 9; doses >= 1; --doses) {
+        const ids = Item.idsByName.get(name.replace(/\(\d\)$/, `(${doses})`));
+        if (!ids) continue;
+        // Names can repeat across variants (e.g. Last Man Standing copies), which sit in a
+        // different id range, so take the id closest to the one we started from.
+        const id = ids.reduce((best, x) => (Math.abs(x - itemId) < Math.abs(best - itemId) ? x : best));
+        result = { id, doses, sourceDoses: parseInt(match[1]) };
+        break;
+      }
+    }
+
+    Item.maxDoseVariantCache.set(itemId, result);
+    return result;
+  }
+
   static itemName(itemId) {
     return Item.itemDetails[itemId].name;
   }

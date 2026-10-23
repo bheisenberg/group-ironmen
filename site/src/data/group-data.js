@@ -226,7 +226,14 @@ export class GroupData {
     for (const member of this.members.values()) {
       const potionMap = member.itemQuantities.potionStorage;
       if (!potionMap) continue;
-      for (const [itemId, doses] of potionMap) {
+      for (let [itemId, doses] of potionMap) {
+        // Potion storage reports doses of a given variant. Show it as full potions of the
+        // highest dose variant instead, dropping any leftover doses.
+        const variant = Item.maxDoseVariant(itemId);
+        if (variant) {
+          itemId = variant.id;
+          doses = Math.floor((doses * variant.sourceDoses) / variant.doses);
+        }
         if (doses <= 0) continue;
         if (!newItems[itemId]) {
           const item = new Item(itemId, 0);
@@ -237,7 +244,8 @@ export class GroupData {
           }
           newItems[itemId] = item;
         }
-        newItems[itemId].quantities[member.name] = doses;
+        // += because several stored variants can map to the same full-dose potion
+        newItems[itemId].quantities[member.name] += doses;
         newItems[itemId].quantity += doses;
       }
     }
