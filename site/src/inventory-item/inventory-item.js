@@ -1,5 +1,6 @@
 import { BaseElement } from "../base-element/base-element";
 import { utility } from "../utility";
+import { groupData } from "../data/group-data";
 
 export class InventoryItem extends BaseElement {
   constructor() {
@@ -11,9 +12,8 @@ export class InventoryItem extends BaseElement {
     const itemId = this.getAttribute("item-id");
     this.showIndividualItemPrices = this.hasAttribute("individual-prices");
     this.playerFilter = this.getAttribute("player-filter");
-    this.isPotionStorage = this.hasAttribute("potion-storage");
 
-    const updateTopic = this.isPotionStorage ? `potion-storage-item-update:${itemId}` : `item-update:${itemId}`;
+    const updateTopic = `item-update:${itemId}`;
 
     const top = this.offsetTop;
     const bottomOfPage = document.body.clientHeight;
@@ -49,13 +49,17 @@ export class InventoryItem extends BaseElement {
     if (this.playerFilter) {
       playerHtml = this.playerHtml(this.playerFilter);
     } else {
-      for (const [playerName, quantity] of Object.entries(item.quantities)) {
-        if (quantity === 0) continue;
+      for (const playerName of groupData.members.keys()) {
+        if (!item.quantities[playerName]) continue;
         playerHtml += this.playerHtml(playerName);
       }
     }
 
-    const badge = this.isPotionStorage ? '<span class="inventory-item__badge">Potion storage</span>' : "";
+    const storageQuantity = this.storageQuantity;
+    const badge =
+      storageQuantity > 0
+        ? `<span class="inventory-item__badge">${storageQuantity.toLocaleString()} in potion storage</span>`
+        : "";
 
     return `{{inventory-item.html}}`;
   }
@@ -86,6 +90,14 @@ export class InventoryItem extends BaseElement {
     }
 
     return this.item.quantity;
+  }
+
+  get storageQuantity() {
+    if (this.playerFilter) {
+      return this.item.storageQuantities?.[this.playerFilter] || 0;
+    }
+
+    return this.item.storageQuantity || 0;
   }
 
   get highAlch() {

@@ -52,7 +52,7 @@ describe("group-data", () => {
 
   it("applies text filters with exact, partial, and id matching", () => {
     const data = new GroupData();
-    data.groupItems = {
+    data.items = {
       1: { id: 1, name: "Rune scimitar", quantities: { Alice: 1 }, visible: false },
       2: { id: 2, name: "Dragon dagger", quantities: { Alice: 1 }, visible: false },
       4151: { id: 4151, name: "Abyssal whip", quantities: { Alice: 1 }, visible: false },
@@ -60,15 +60,56 @@ describe("group-data", () => {
 
     data.applyTextFilter("rune|\"dragon dagger\"|4151");
 
-    expect(data.groupItems[1].visible).toBe(true);
-    expect(data.groupItems[2].visible).toBe(true);
-    expect(data.groupItems[4151].visible).toBe(true);
+    expect(data.items[1].visible).toBe(true);
+    expect(data.items[2].visible).toBe(true);
+    expect(data.items[4151].visible).toBe(true);
 
     data.applyTextFilter("\"dragon dagger\"");
 
-    expect(data.groupItems[1].visible).toBe(false);
-    expect(data.groupItems[2].visible).toBe(true);
-    expect(data.groupItems[4151].visible).toBe(false);
+    expect(data.items[1].visible).toBe(false);
+    expect(data.items[2].visible).toBe(true);
+    expect(data.items[4151].visible).toBe(false);
+  });
+
+  describe("member order", () => {
+    const names = (data) => [...data.members.keys()];
+
+    it("lists members by name until an order is chosen, with group storage last", () => {
+      const data = new GroupData();
+      data.update([{ name: "Cara" }, { name: "@SHARED" }, { name: "alice" }, { name: "Bob" }]);
+      expect(names(data)).toEqual(["alice", "Bob", "Cara", "@SHARED"]);
+    });
+
+    it("applies the chosen order and tells the menus", () => {
+      const data = new GroupData();
+      data.update([{ name: "Alice" }, { name: "Bob" }, { name: "Cara" }, { name: "@SHARED" }]);
+      const published = [];
+      pubsub.subscribe("members-updated", (members) => published.push(members.map((m) => m.name)), false);
+
+      data.applyMemberOrder(["cara", "Alice", "Bob"]);
+      expect(names(data)).toEqual(["Cara", "Alice", "Bob", "@SHARED"]);
+      expect(published).toEqual([["Cara", "Alice", "Bob", "@SHARED"]]);
+
+      data.applyMemberOrder(["Cara", "Alice", "Bob"]);
+      expect(published).toHaveLength(1); // unchanged order isn't re-published
+    });
+
+    it("puts members missing from the order after it, by name, including ones added later", () => {
+      const data = new GroupData();
+      data.update([{ name: "Alice" }, { name: "Bob" }, { name: "Cara" }]);
+      data.applyMemberOrder(["Cara"]);
+      expect(names(data)).toEqual(["Cara", "Alice", "Bob"]);
+
+      data.update([{ name: "Alice" }, { name: "Bob" }, { name: "Cara" }, { name: "Aaron" }]);
+      expect(names(data)).toEqual(["Cara", "Aaron", "Alice", "Bob"]);
+    });
+
+    it("keeps the order for when members arrive if it loads first", () => {
+      const data = new GroupData();
+      data.applyMemberOrder(["Bob", "Alice"]);
+      data.update([{ name: "Alice" }, { name: "Bob" }]);
+      expect(names(data)).toEqual(["Bob", "Alice"]);
+    });
   });
 
   describe("potion storage", () => {
@@ -100,7 +141,6 @@ describe("group-data", () => {
       expect(data.potionStorageItems[244].quantities.Alice).toBe(4);
       expect(data.potionStorageItems[244].quantities.Bob).toBe(2);
       expect(data.potionStorageItems[245].quantity).toBe(1);
-      expect(data.potionStorageItems[244].source).toBe("potion-storage");
     });
 
     it("removes potion entries after an explicit empty update", () => {
@@ -123,10 +163,10 @@ describe("group-data", () => {
       expect(itemsUpdated).toBe(true);
     });
 
-    it("publishes source-specific potion-storage-item-update events", () => {
+    it("publishes item-update events for potion storage items", () => {
       const data = new GroupData();
       const events = [];
-      pubsub.subscribe("potion-storage-item-update:244", (item) => {
+      pubsub.subscribe("item-update:244", (item) => {
         events.push(item);
       });
 
@@ -134,6 +174,24 @@ describe("group-data", () => {
       expect(events).toHaveLength(1);
       expect(events[0].id).toBe(244);
       expect(events[0].quantity).toBe(4);
+      expect(events[0].storageQuantity).toBe(4);
+    });
+
+    it("converts doses to the highest dose variant and merges with banked potions", () => {
+      Item.itemDetails = { ...Item.itemDetails, 2428: { id: 2428, name: "Attack potion(4)", highalch: 4 } };
+      const data = new GroupData();
+      // 9 doses of Attack potion(1) -> 2 Attack potion(4), the leftover dose is dropped
+      data.update([
+        { name: "Alice", bank: [2428, 3], potion_storage: [244, 9] },
+        { name: "Bob", bank: [2428, 1] },
+      ]);
+
+      const item = data.items[2428];
+      expect(item.quantity).toBe(6);
+      expect(item.storageQuantity).toBe(2);
+      expect(item.quantities).toEqual({ Alice: 5, Bob: 1 });
+      expect(item.storageQuantities).toEqual({ Alice: 2, Bob: 0 });
+      expect(data.items[244]).toBeUndefined();
     });
 
     it("applies text filters to the potion storage collection", () => {
@@ -143,8 +201,8 @@ describe("group-data", () => {
       ]);
 
       data.applyTextFilter("attack");
-      expect(data.potionStorageItems[244].visible).toBe(true);
-      expect(data.potionStorageItems[245].visible).toBe(false);
+      expect(data.items[244].visible).toBe(true);
+      expect(data.items[245].visible).toBe(false);
     });
 
     it("applies player filters to the potion storage collection", () => {
@@ -155,8 +213,8 @@ describe("group-data", () => {
       ]);
 
       data.applyPlayerFilter("Alice");
-      expect(data.potionStorageItems[244].visible).toBe(true);
-      expect(data.potionStorageItems[245].visible).toBe(false);
+      expect(data.items[244].visible).toBe(true);
+      expect(data.items[245].visible).toBe(false);
     });
 
     it("does not include potion doses in normal groupItems", () => {

@@ -1,0 +1,39 @@
+<div class="gear-page__head">
+  <div class="men-control-container rsborder-tiny rsbackground rsbackground-hover gear-page__setup-only">
+    <select class="gear-page__setup-select"></select>
+  </div>
+  <div class="men-control-container rsborder-tiny rsbackground gear-page__setup-only">
+    <input class="gear-page__setup-name" type="text" maxlength="40" placeholder="Setup name" />
+  </div>
+  <button class="men-button small gear-page__setup-only" type="button" data-action="save" disabled>Save</button>
+  <button class="men-button small gear-page__setup-only" type="button" data-action="discard" disabled>Discard</button>
+  <button class="men-button small" type="button" data-action="new-setup">New setup</button>
+  <button class="men-button small gear-page__setup-only" type="button" data-action="delete-setup">Delete</button>
+  <button class="men-button small gear-page__setup-only" type="button" data-action="view-edit">Edit</button>
+  <button class="men-button small gear-page__setup-only" type="button" data-action="view-overview">Overview</button>
+  <span class="gear-page__status"></span>
+</div>
+<div class="gear-page__members gear-page__setup-only"></div>
+<div class="gear-page__body">
+  <div class="gear-page__overview"></div>
+  <div class="gear-page__loadout rsborder rsbackground gear-page__setup-only">
+    <div class="equipment gear-page__equipment"></div>
+    <div class="gear-page__inventory">
+      <div class="player-inventory__background"></div>
+      <div class="player-inventory__inventory gear-page__inventory-grid"></div>
+    </div>
+  </div>
+  <div class="gear-page__picker rsborder rsbackground">
+    <div class="gear-page__picker-head"></div>
+    <div class="gear-page__picker-controls gear-page__setup-only">
+      <search-element class="gear-page__search" placeholder="Search group items"></search-element>
+      <label class="gear-page__quantity-label">
+        Quantity
+        <input class="gear-page__quantity" type="number" min="1" value="1" />
+      </label>
+    </div>
+    <div class="gear-page__picker-list"></div>
+  </div>
+</div>
+<div class="gear-page__warnings"></div>
+<div class="gear-page__context-menu rsborder-tiny"></div>

@@ -29,6 +29,10 @@ pub enum ApiError {
     GroupFullError,
     UreqError(ureq::Error),
     GroupMemberValidationError(String),
+    #[from(ignore)]
+    LoadoutValidationError(String),
+    LoadoutNotFound,
+    LoadoutVersionConflict,
 }
 impl std::error::Error for ApiError {}
 fn handle_pg_error(err: &tokio_postgres::error::Error, name: &str) -> HttpResponse {
@@ -76,6 +80,12 @@ impl ResponseError for ApiError {
                 log::error!("Validation error: {}", reason);
                 HttpResponse::BadRequest().body(reason.clone())
             }
+            ApiError::LoadoutValidationError(ref reason) => {
+                HttpResponse::BadRequest().body(reason.clone())
+            }
+            ApiError::LoadoutNotFound => HttpResponse::NotFound().body("Loadout setup not found"),
+            ApiError::LoadoutVersionConflict => HttpResponse::Conflict()
+                .body("Loadout setup was changed by someone else; reload and try again"),
         }
     }
 }

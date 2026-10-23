@@ -6,10 +6,26 @@ import { SkillGraph } from "../skill-graph/skill-graph";
 import { GroupData } from "./group-data";
 import { AchievementDiary } from "./diaries";
 
+const clone = (value) => JSON.parse(JSON.stringify(value));
+
 class ExampleData {
   enable() {
     this.disable();
-    this.reset();
+    const loadId = this.loadId;
+    // A local snapshot of a real group's data (from get-group-data) replaces the random sample when
+    // present. It is not committed, so the deployed demo always uses the random sample.
+    fetch("/data/sample-snapshot.json")
+      .then((response) => (response.ok ? response.json() : null))
+      .catch(() => null)
+      .then((snapshot) => {
+        if (loadId !== this.loadId) return; // disabled while loading
+        this.snapshot = Array.isArray(snapshot) ? snapshot : null;
+        this.reset();
+        if (!this.snapshot) this.startRandomUpdates();
+      });
+  }
+
+  startRandomUpdates() {
     this.intervals = [
       utility.callOnInterval(this.doHealthUpdate.bind(this), 3000),
       utility.callOnInterval(this.doXpDrop.bind(this), 2000),
@@ -27,6 +43,8 @@ class ExampleData {
   }
 
   disable() {
+    this.loadId = (this.loadId || 0) + 1;
+    this.members = undefined;
     if (this.intervals) {
       for (const interval of this.intervals) {
         clearInterval(interval);
@@ -37,6 +55,11 @@ class ExampleData {
   }
 
   reset() {
+    if (this.snapshot) {
+      this.members = Object.fromEntries(this.snapshot.map(({ name, ...data }) => [name, data]));
+      return;
+    }
+
     this.members = {
       Zezima: {
         quests: Quest.randomQuestStates(),
@@ -165,9 +188,15 @@ class ExampleData {
   }
 
   getGroupData() {
+    if (!this.members) return [];
     const groupData = Object.entries(this.members).map(([name, data]) => {
       return { name, ...data };
     });
+    if (this.snapshot) {
+      // The snapshot is static, so later polls only need to keep the members present
+      this.members = Object.fromEntries(Object.keys(this.members).map((name) => [name, {}]));
+      return groupData;
+    }
     this.members = {
       "group alt two": {
         skills: this.members["group alt two"].skills,
@@ -228,6 +257,41 @@ class ExampleData {
 
   getCollectionLog() {
     return {};
+  }
+
+  getMemberOrder() {
+    return clone(this.memberOrder || []);
+  }
+
+  setMemberOrder(memberNames) {
+    this.memberOrder = clone(memberNames);
+    return clone(this.memberOrder);
+  }
+
+  // In-memory stand-in for the loadouts API, mirroring its version checks
+  getLoadouts() {
+    return clone(this.loadoutSetups || []);
+  }
+
+  createLoadoutSetup(name) {
+    if (!this.loadoutSetups) this.loadoutSetups = [];
+    const setup = { id: (this.nextLoadoutSetupId = (this.nextLoadoutSetupId || 0) + 1), name, version: 1, members: {} };
+    this.loadoutSetups.push(setup);
+    return clone(setup);
+  }
+
+  updateLoadoutSetup({ id, name, version, members }) {
+    const setup = this.loadoutSetups?.find((x) => x.id === id);
+    if (!setup) return { ok: false, status: 404, data: "Loadout setup not found" };
+    if (setup.version !== version) return { ok: false, status: 409, data: "Loadout setup was changed" };
+    Object.assign(setup, { name, version: version + 1, members: clone(members) });
+    return { ok: true, status: 200, data: clone(setup) };
+  }
+
+  deleteLoadoutSetup(id) {
+    const before = this.loadoutSetups?.length || 0;
+    this.loadoutSetups = (this.loadoutSetups || []).filter((x) => x.id !== id);
+    return before === this.loadoutSetups.length ? { ok: false, status: 404 } : { ok: true, status: 200 };
   }
 }
 

@@ -117,3 +117,43 @@ pub struct CaptchaVerifyResponse {
     // #[serde(rename = "error-codes", default)]
     // pub error_codes: std::vec::Vec<String>,
 }
+
+// Gear loadouts: a group has named setups, and each setup holds at most one loadout per member.
+// equipment is 14 [item id, quantity] pairs indexed by equipment slot, inventory is 28 pairs.
+pub const LOADOUT_EQUIPMENT_LEN: usize = 28;
+pub const LOADOUT_INVENTORY_LEN: usize = 56;
+pub const MAX_LOADOUT_SETUPS_PER_GROUP: i64 = 50;
+pub const MAX_LOADOUT_SETUP_NAME_LEN: usize = 40;
+
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct MemberLoadout {
+    pub equipment: Vec<i32>,
+    pub inventory: Vec<i32>,
+}
+#[derive(Serialize)]
+pub struct LoadoutSetup {
+    pub id: i64,
+    pub name: String,
+    pub version: i32,
+    pub members: std::collections::HashMap<String, MemberLoadout>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateLoadoutSetup {
+    pub name: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateLoadoutSetup {
+    pub name: String,
+    pub version: i32,
+    pub members: std::collections::HashMap<String, MemberLoadout>,
+}
+
+// The order members are listed in across the site, set from the settings page
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberOrder {
+    pub member_names: Vec<String>,
+}

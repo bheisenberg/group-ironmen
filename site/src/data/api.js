@@ -39,6 +39,14 @@ class Api {
     return `${this.baseUrl}/group/${this.groupName}/get-skill-data`;
   }
 
+  get memberOrderUrl() {
+    return `${this.baseUrl}/group/${this.groupName}/member-order`;
+  }
+
+  get loadoutsUrl() {
+    return `${this.baseUrl}/group/${this.groupName}/loadouts`;
+  }
+
   get captchaEnabledUrl() {
     return `${this.baseUrl}/captcha-enabled`;
   }
@@ -57,6 +65,7 @@ class Api {
   async enable(groupName, groupToken) {
     await this.disable();
     this.nextCheck = new Date(0).toISOString();
+    this.memberOrderPolls = 0;
     this.setCredentials(groupName, groupToken);
 
     if (!this.enabled) {
@@ -77,7 +86,10 @@ class Api {
     this.groupName = undefined;
     this.groupToken = undefined;
     groupData.members = new Map();
+    groupData.memberOrder = [];
     groupData.groupItems = {};
+    groupData.potionStorageItems = {};
+    groupData.items = {};
     groupData.filters = [""];
     if (this.getGroupInterval) {
       window.clearInterval(await this.getGroupInterval);
@@ -110,6 +122,30 @@ class Api {
       this.nextCheck = groupData.update(newGroupData).toISOString();
       pubsub.publish("get-group-data", groupData);
     }
+
+    // Load the member order with the first group data, then every 30 polls so changes
+    // someone else makes in settings show up without a reload
+    if (this.memberOrderPolls++ % 30 === 0) this.refreshMemberOrder();
+  }
+
+  async refreshMemberOrder() {
+    try {
+      const result = await this.getMemberOrder();
+      if (result.ok) groupData.applyMemberOrder(result.data);
+    } catch {
+      // Keep the current order; the next refresh will try again
+    }
+  }
+
+  // Resolves to { ok, status, data } where data is the ordered member names
+  async getMemberOrder() {
+    if (this.exampleDataEnabled) return { ok: true, status: 200, data: exampleData.getMemberOrder() };
+    return this.loadoutRequest(this.memberOrderUrl, "GET");
+  }
+
+  async setMemberOrder(memberNames) {
+    if (this.exampleDataEnabled) return { ok: true, status: 200, data: exampleData.setMemberOrder(memberNames) };
+    return this.loadoutRequest(this.memberOrderUrl, "PUT", { member_names: memberNames });
   }
 
   async createGroup(groupName, memberNames, captchaResponse) {
@@ -188,6 +224,40 @@ class Api {
       });
       return response.json();
     }
+  }
+
+  // Loadout setups resolve to { ok, status, data }. The demo keeps them in memory instead.
+  async getLoadouts() {
+    if (this.exampleDataEnabled) return { ok: true, status: 200, data: exampleData.getLoadouts() };
+    return this.loadoutRequest(this.loadoutsUrl, "GET");
+  }
+
+  async createLoadoutSetup(name) {
+    if (this.exampleDataEnabled) return { ok: true, status: 200, data: exampleData.createLoadoutSetup(name) };
+    return this.loadoutRequest(this.loadoutsUrl, "POST", { name });
+  }
+
+  async updateLoadoutSetup(setup) {
+    if (this.exampleDataEnabled) return exampleData.updateLoadoutSetup(setup);
+    const { name, version, members } = setup;
+    return this.loadoutRequest(`${this.loadoutsUrl}/${setup.id}`, "PUT", { name, version, members });
+  }
+
+  async deleteLoadoutSetup(setupId) {
+    if (this.exampleDataEnabled) return exampleData.deleteLoadoutSetup(setupId);
+    return this.loadoutRequest(`${this.loadoutsUrl}/${setupId}`, "DELETE");
+  }
+
+  async loadoutRequest(url, method, body) {
+    const headers = { Authorization: this.groupToken };
+    if (body) headers["Content-Type"] = "application/json";
+    const response = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
+    const text = await response.text();
+    let data = text;
+    if (response.ok && text) {
+      data = JSON.parse(text);
+    }
+    return { ok: response.ok, status: response.status, data };
   }
 
   async getCaptchaEnabled() {

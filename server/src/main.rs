@@ -52,7 +52,13 @@ async fn main() -> std::io::Result<()> {
             .service(authed::am_i_logged_in)
             .service(authed::am_i_in_group)
             .service(authed::get_skill_data)
-            .service(authed::get_collection_log);
+            .service(authed::get_collection_log)
+            .service(authed::get_loadouts)
+            .service(authed::create_loadout_setup)
+            .service(authed::update_loadout_setup)
+            .service(authed::delete_loadout_setup)
+            .service(authed::get_member_order)
+            .service(authed::set_member_order);
         let json_config = web::JsonConfig::default().limit(100000);
         let cors = Cors::default()
             .allow_any_origin()

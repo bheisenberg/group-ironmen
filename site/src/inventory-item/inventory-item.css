@@ -75,7 +75,3 @@ inventory-item.rendered {
   font-weight: bold;
   color: hsl(280, 80%, 85%);
 }
-
-inventory-item[potion-storage] .inventory-item__top {
-  background: hsla(280, 40%, 20%, 0.4);
-}

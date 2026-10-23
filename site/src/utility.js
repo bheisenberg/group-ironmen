@@ -47,6 +47,15 @@ class Utility {
     return this.formatShortQuantity(quantity);
   }
 
+  escapeHtml(str) {
+    return String(str)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+
   displayName(memberName) {
     return memberName === "@SHARED" ? "Group Storage" : memberName;
   }

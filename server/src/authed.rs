@@ -2,7 +2,9 @@ use crate::auth_middleware::Authenticated;
 use crate::db;
 use crate::error::ApiError;
 use crate::models::{
-    AmIInGroupRequest, GroupMember, GroupSkillData, RenameGroupMember, SHARED_MEMBER,
+    AmIInGroupRequest, CreateLoadoutSetup, GroupMember, GroupSkillData, LoadoutSetup,
+    MemberLoadout, MemberOrder, RenameGroupMember, UpdateLoadoutSetup, LOADOUT_EQUIPMENT_LEN,
+    LOADOUT_INVENTORY_LEN, MAX_LOADOUT_SETUP_NAME_LEN, SHARED_MEMBER,
 };
 use crate::validators::{valid_name, validate_member_prop_length, ArrayFormat};
 use actix_web::{delete, get, post, put, web, Error, HttpResponse};
@@ -265,4 +267,131 @@ pub async fn am_i_in_group(
 #[get("/collection-log")]
 pub async fn get_collection_log() -> Result<web::Json<HashMap<String, Vec<i32>>>, Error> {
     Ok(web::Json(HashMap::new()))
+}
+
+fn validate_loadout_setup_name(name: &str) -> Result<String, ApiError> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > MAX_LOADOUT_SETUP_NAME_LEN {
+        return Err(ApiError::LoadoutValidationError(format!(
+            "Setup name must be 1 to {} characters",
+            MAX_LOADOUT_SETUP_NAME_LEN
+        )));
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err(ApiError::LoadoutValidationError(
+            "Setup name contains invalid characters".to_owned(),
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+fn validate_member_loadout(member_name: &str, loadout: &MemberLoadout) -> Result<(), ApiError> {
+    for (field, values, expected_len) in [
+        ("equipment", &loadout.equipment, LOADOUT_EQUIPMENT_LEN),
+        ("inventory", &loadout.inventory, LOADOUT_INVENTORY_LEN),
+    ] {
+        if values.len() != expected_len {
+            return Err(ApiError::LoadoutValidationError(format!(
+                "{} {} must have {} values, got {}",
+                member_name,
+                field,
+                expected_len,
+                values.len()
+            )));
+        }
+        if values.iter().any(|&x| x < 0) {
+            return Err(ApiError::LoadoutValidationError(format!(
+                "{} {} contains a negative value",
+                member_name, field
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[get("/loadouts")]
+pub async fn get_loadouts(
+    auth: Authenticated,
+    db_pool: web::Data<Pool>,
+) -> Result<web::Json<Vec<LoadoutSetup>>, Error> {
+    let client: Client = db_pool.get().await.map_err(ApiError::PoolError)?;
+    let setups = db::get_loadout_setups(&client, auth.group_id).await?;
+    Ok(web::Json(setups))
+}
+
+#[post("/loadouts")]
+pub async fn create_loadout_setup(
+    auth: Authenticated,
+    body: web::Json<CreateLoadoutSetup>,
+    db_pool: web::Data<Pool>,
+) -> Result<web::Json<LoadoutSetup>, Error> {
+    let name = validate_loadout_setup_name(&body.name)?;
+    let client: Client = db_pool.get().await.map_err(ApiError::PoolError)?;
+    let setup = db::create_loadout_setup(&client, auth.group_id, &name).await?;
+    Ok(web::Json(setup))
+}
+
+#[put("/loadouts/{setup_id}")]
+pub async fn update_loadout_setup(
+    auth: Authenticated,
+    path: web::Path<(String, i64)>,
+    body: web::Json<UpdateLoadoutSetup>,
+    db_pool: web::Data<Pool>,
+) -> Result<web::Json<LoadoutSetup>, Error> {
+    let (_, setup_id) = path.into_inner();
+    let mut update = body.into_inner();
+    update.name = validate_loadout_setup_name(&update.name)?;
+    for (member_name, loadout) in &update.members {
+        if member_name.eq(SHARED_MEMBER) {
+            return Err(ApiError::LoadoutValidationError(format!(
+                "{} cannot have a loadout",
+                SHARED_MEMBER
+            ))
+            .into());
+        }
+        validate_member_loadout(member_name, loadout)?;
+    }
+
+    let mut client: Client = db_pool.get().await.map_err(ApiError::PoolError)?;
+    db::update_loadout_setup(&mut client, auth.group_id, setup_id, &update).await?;
+    let setup = db::get_loadout_setups(&client, auth.group_id)
+        .await?
+        .into_iter()
+        .find(|setup| setup.id == setup_id)
+        .ok_or(ApiError::LoadoutNotFound)?;
+    Ok(web::Json(setup))
+}
+
+#[delete("/loadouts/{setup_id}")]
+pub async fn delete_loadout_setup(
+    auth: Authenticated,
+    path: web::Path<(String, i64)>,
+    db_pool: web::Data<Pool>,
+) -> Result<HttpResponse, Error> {
+    let (_, setup_id) = path.into_inner();
+    let client: Client = db_pool.get().await.map_err(ApiError::PoolError)?;
+    db::delete_loadout_setup(&client, auth.group_id, setup_id).await?;
+    Ok(HttpResponse::Ok().finish())
+}
+
+#[get("/member-order")]
+pub async fn get_member_order(
+    auth: Authenticated,
+    db_pool: web::Data<Pool>,
+) -> Result<web::Json<Vec<String>>, Error> {
+    let client: Client = db_pool.get().await.map_err(ApiError::PoolError)?;
+    let names = db::get_member_order(&client, auth.group_id).await?;
+    Ok(web::Json(names))
+}
+
+#[put("/member-order")]
+pub async fn set_member_order(
+    auth: Authenticated,
+    body: web::Json<MemberOrder>,
+    db_pool: web::Data<Pool>,
+) -> Result<web::Json<Vec<String>>, Error> {
+    let mut client: Client = db_pool.get().await.map_err(ApiError::PoolError)?;
+    db::set_member_order(&mut client, auth.group_id, &body.member_names).await?;
+    let names = db::get_member_order(&client, auth.group_id).await?;
+    Ok(web::Json(names))
 }

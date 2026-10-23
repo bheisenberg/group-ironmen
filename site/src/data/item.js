@@ -30,7 +30,12 @@ export class Item {
   // ("Prayer potion(4)", or "(2)" for barbarian mixes) along with the dose counts of both.
   // Returns null for items without a dose suffix, e.g. unfinished potions.
   static maxDoseVariant(itemId) {
-    Item.maxDoseVariantCache ??= new Map();
+    // Caches are built from itemDetails, so start over if it has been replaced
+    if (Item.maxDoseVariantSource !== Item.itemDetails) {
+      Item.maxDoseVariantSource = Item.itemDetails;
+      Item.maxDoseVariantCache = new Map();
+      Item.idsByName = null;
+    }
     if (Item.maxDoseVariantCache.has(itemId)) return Item.maxDoseVariantCache.get(itemId);
 
     let result = null;

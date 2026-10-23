@@ -1,0 +1,271 @@
+.gear-page__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.gear-page__head .men-control-container {
+  margin-left: 0;
+}
+
+.gear-page__setup-name {
+  width: 14em;
+}
+
+.gear-page__status {
+  color: var(--orange);
+}
+
+.gear-page__status--error {
+  color: var(--red);
+}
+
+.gear-page__members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.gear-page__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.gear-page__loadout {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+}
+
+.gear-page--disabled .gear-page__loadout {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.gear-page__inventory {
+  --inventory-height: 254px;
+  position: relative;
+  width: 190px;
+  height: var(--inventory-height);
+}
+
+.gear-page__inventory .player-inventory__inventory {
+  position: relative;
+}
+
+.gear-page__inventory-cell {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.gear-page__inventory-cell item-box {
+  height: 32px;
+}
+
+.gear-page__slot {
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.gear-page__slot:hover {
+  background-color: rgba(255, 255, 255, 0.12);
+}
+
+.gear-page__slot.selected {
+  outline: 2px solid var(--orange);
+  outline-offset: -2px;
+}
+
+.gear-page__over {
+  filter: drop-shadow(0 0 3px var(--red));
+}
+
+.gear-page__picker {
+  flex: 1;
+  min-width: 260px;
+  max-width: 520px;
+  padding: 12px;
+}
+
+.gear-page__picker h3 {
+  margin: 0 0 6px 0;
+}
+
+.gear-page__picker p {
+  margin: 0 0 8px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.gear-page__picker-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.gear-page__quantity {
+  width: 6em;
+  margin-left: 4px;
+}
+
+.gear-page__hidden {
+  display: none;
+}
+
+.gear-page__picker-list {
+  display: flex;
+  flex-direction: column;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.gear-page__pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.gear-page__pick img {
+  width: 36px;
+  height: 32px;
+  object-fit: contain;
+}
+
+.gear-page__pick-name {
+  flex: 1;
+}
+
+.gear-page__pick-available {
+  color: var(--orange);
+  white-space: nowrap;
+}
+
+.gear-page__empty {
+  opacity: 0.8;
+}
+
+/* With no setups yet, only "New setup" and the explanation are shown */
+.gear-page--empty .gear-page__setup-only {
+  display: none;
+}
+
+/* Styled after the game's right-click menu */
+.gear-page__context-menu {
+  display: none;
+  position: fixed;
+  z-index: 100;
+  flex-direction: column;
+  min-width: 160px;
+  padding: 2px;
+  background: #5d5447;
+}
+
+.gear-page__context-menu.open {
+  display: flex;
+}
+
+.gear-page__context-menu button {
+  padding: 3px 8px;
+  border: none;
+  background: transparent;
+  color: white;
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.gear-page__context-menu button:hover {
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.gear-page__context-item {
+  color: var(--orange);
+}
+
+.gear-page__overview {
+  display: none;
+  flex: 1;
+  min-width: 250px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.gear-page--overview .gear-page__overview {
+  display: flex;
+}
+
+.gear-page--overview .gear-page__members,
+.gear-page--overview .gear-page__loadout {
+  display: none;
+}
+
+/* Keep the picker in view while scrolling through the cards */
+.gear-page--overview .gear-page__picker {
+  position: sticky;
+  top: 0;
+  flex: 0 1 380px;
+}
+
+.gear-page__overview-card {
+  box-sizing: border-box;
+  width: 240px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+}
+
+.gear-page__overview-card--editing {
+  outline: 2px solid var(--orange);
+}
+
+.gear-page__overview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+
+.gear-page__overview-head h3 {
+  margin: 0;
+  font-size: 20px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gear-page__warnings {
+  margin-top: 12px;
+}
+
+.gear-page__warnings > div {
+  padding: 8px 12px;
+  color: var(--red);
+}
+
+.gear-page__warnings ul {
+  margin: 4px 0 0 0;
+}

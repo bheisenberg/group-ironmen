@@ -8,8 +8,12 @@ import { utility } from "../utility";
 export class GroupData {
   constructor() {
     this.members = new Map();
+    // Member names in the order the group chose in settings
+    this.memberOrder = [];
     this.groupItems = {};
     this.potionStorageItems = {};
+    // groupItems and potionStorageItems merged by item id; this is what the items page shows
+    this.items = {};
     this.textFilter = "";
     this.textFilters = [""];
     this.playerFilter = "@ALL";
@@ -76,20 +80,13 @@ export class GroupData {
           }
 
           let groupItem = this.groupItems[item.id];
-          let applyFilter = false;
           if (!groupItem) {
             groupItem = new Item(item.id, 0);
-            applyFilter = true;
           }
           groupItem.quantity = total;
           groupItem.quantities = itemQuantities;
           this.groupItems[item.id] = groupItem;
 
-          if (applyFilter) {
-            groupItem.visible = this.shouldItemBeVisible(groupItem, this.textFilters, this.playerFilter);
-          }
-
-          pubsub.publish(`item-update:${item.id}`, groupItem);
           anyItemUpdates = true;
         }
       }
@@ -113,14 +110,37 @@ export class GroupData {
     const currentNames = [...this.members.values()].map((x) => x.name);
     const membersUpdated = !utility.setsEqual(new Set(currentNames), new Set(previousNames));
     if (membersUpdated) {
+      this.sortMembers();
       pubsub.publish("members-updated", [...this.members.values()]);
     }
 
     if (anyItemUpdates) {
+      this.rebuildItems();
       pubsub.publish("items-updated");
     }
 
     return new Date(lastUpdated.getTime() + 1);
+  }
+
+  // Puts members in the group's chosen order. Anyone not in it (e.g. newly added) goes after,
+  // by name, and group storage always comes last.
+  sortMembers() {
+    const position = new Map(this.memberOrder.map((name, i) => [name.toLowerCase(), i]));
+    const rank = (member) => {
+      if (member.name === "@SHARED") return Infinity;
+      return position.get(member.name.toLowerCase()) ?? this.memberOrder.length;
+    };
+    const sorted = [...this.members.values()].sort((a, b) => rank(a) - rank(b) || a.name.localeCompare(b.name));
+    this.members = new Map(sorted.map((member) => [member.name, member]));
+  }
+
+  applyMemberOrder(memberNames) {
+    const before = [...this.members.keys()].join("\n");
+    this.memberOrder = memberNames;
+    this.sortMembers();
+    if (this.members.size > 0 && [...this.members.keys()].join("\n") !== before) {
+      pubsub.publish("members-updated", [...this.members.values()]);
+    }
   }
 
   convertFilterToFilterList(filter) {
@@ -170,7 +190,7 @@ export class GroupData {
   }
 
   applyVisibilityAllItems(textFilters, playerFilter) {
-    for (const item of [...Object.values(this.groupItems), ...Object.values(this.potionStorageItems)]) {
+    for (const item of Object.values(this.items)) {
       item.visible = this.shouldItemBeVisible(item, textFilters, playerFilter);
     }
   }
@@ -237,7 +257,6 @@ export class GroupData {
         if (doses <= 0) continue;
         if (!newItems[itemId]) {
           const item = new Item(itemId, 0);
-          item.source = "potion-storage";
           item.quantities = {};
           for (const name of memberNames) {
             item.quantities[name] = 0;
@@ -252,10 +271,8 @@ export class GroupData {
 
     let changed = false;
     for (const item of Object.values(newItems)) {
-      item.visible = this.shouldItemBeVisible(item, this.textFilters, this.playerFilter);
       const previous = this.potionStorageItems[item.id];
       if (!this.quantitiesEqual(previous?.quantities, item.quantities)) {
-        pubsub.publish(`potion-storage-item-update:${item.id}`, item);
         changed = true;
       }
     }
@@ -268,6 +285,42 @@ export class GroupData {
 
     this.potionStorageItems = newItems;
     return changed;
+  }
+
+  // Combine group items with potion storage so a potion shows as one card, with the
+  // potion storage share tracked separately in storageQuantity/storageQuantities.
+  rebuildItems() {
+    const newItems = {};
+    const ids = new Set([...Object.keys(this.groupItems), ...Object.keys(this.potionStorageItems)]);
+    for (const id of ids) {
+      const groupItem = this.groupItems[id];
+      const storageItem = this.potionStorageItems[id];
+      const quantities = {};
+      const storageQuantities = {};
+      for (const name of this.members.keys()) {
+        storageQuantities[name] = storageItem?.quantities[name] || 0;
+        quantities[name] = (groupItem?.quantities[name] || 0) + storageQuantities[name];
+      }
+
+      const previous = this.items[id];
+      const item = previous || new Item(id, 0);
+      item.quantity = (groupItem?.quantity || 0) + (storageItem?.quantity || 0);
+      item.storageQuantity = storageItem?.quantity || 0;
+      const changed =
+        !previous ||
+        !this.quantitiesEqual(previous.quantities, quantities) ||
+        !this.quantitiesEqual(previous.storageQuantities, storageQuantities);
+      item.quantities = quantities;
+      item.storageQuantities = storageQuantities;
+      item.visible = this.shouldItemBeVisible(item, this.textFilters, this.playerFilter);
+      newItems[id] = item;
+
+      if (changed) {
+        pubsub.publish(`item-update:${id}`, item);
+      }
+    }
+
+    this.items = newItems;
   }
 
   static transformItemsFromStorage(items) {

@@ -1,7 +1,8 @@
 use crate::crypto::token_hash;
 use crate::error::ApiError;
 use crate::models::{
-    AggregateSkillData, CreateGroup, GroupMember, GroupSkillData, MemberSkillData, SHARED_MEMBER,
+    AggregateSkillData, CreateGroup, GroupMember, GroupSkillData, LoadoutSetup, MemberLoadout,
+    MemberSkillData, UpdateLoadoutSetup, MAX_LOADOUT_SETUPS_PER_GROUP, SHARED_MEMBER,
 };
 use chrono::{DateTime, Utc};
 use deadpool_postgres::{Client, Transaction};
@@ -895,5 +896,294 @@ ADD COLUMN IF NOT EXISTS potion_storage INTEGER[]
         transaction.commit().await?;
     }
 
+    if !has_migration_run(client, "add_loadouts").await? {
+        let transaction = client.transaction().await?;
+        transaction
+            .batch_execute(
+                r#"
+CREATE TABLE IF NOT EXISTS groupironman.loadout_setups (
+    setup_id BIGSERIAL PRIMARY KEY,
+    group_id BIGINT NOT NULL REFERENCES groupironman.groups(group_id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS loadout_setups_group_id_idx ON groupironman.loadout_setups (group_id);
+CREATE TABLE IF NOT EXISTS groupironman.loadouts (
+    setup_id BIGINT NOT NULL REFERENCES groupironman.loadout_setups(setup_id) ON DELETE CASCADE,
+    member_id BIGINT NOT NULL REFERENCES groupironman.members(member_id) ON DELETE CASCADE,
+    equipment INTEGER[] NOT NULL,
+    inventory INTEGER[] NOT NULL,
+    PRIMARY KEY (setup_id, member_id)
+);
+"#,
+            )
+            .await?;
+
+        commit_migration(&transaction, "add_loadouts").await?;
+        transaction.commit().await?;
+    }
+
+    if !has_migration_run(client, "add_member_display_order").await? {
+        let transaction = client.transaction().await?;
+        transaction
+            .execute(
+                "ALTER TABLE groupironman.members ADD COLUMN IF NOT EXISTS display_order INTEGER",
+                &[],
+            )
+            .await?;
+        commit_migration(&transaction, "add_member_display_order").await?;
+        transaction.commit().await?;
+    }
+
+    Ok(())
+}
+
+// Loadouts reference members by member_id, so renaming a member keeps their loadouts and
+// deleting a member removes them (ON DELETE CASCADE).
+pub async fn get_loadout_setups(
+    client: &Client,
+    group_id: i64,
+) -> Result<Vec<LoadoutSetup>, ApiError> {
+    let setup_rows = client
+        .query(
+            "SELECT setup_id, name, version FROM groupironman.loadout_setups WHERE group_id=$1 ORDER BY setup_id",
+            &[&group_id],
+        )
+        .await?;
+    let loadout_rows = client
+        .query(
+            r#"
+SELECT l.setup_id, m.member_name::TEXT AS member_name, l.equipment, l.inventory
+FROM groupironman.loadouts l
+JOIN groupironman.loadout_setups s ON s.setup_id=l.setup_id
+JOIN groupironman.members m ON m.member_id=l.member_id
+WHERE s.group_id=$1
+"#,
+            &[&group_id],
+        )
+        .await?;
+
+    let mut setups: Vec<LoadoutSetup> = setup_rows
+        .iter()
+        .map(|row| {
+            Ok(LoadoutSetup {
+                id: row.try_get("setup_id")?,
+                name: row.try_get("name")?,
+                version: row.try_get("version")?,
+                members: HashMap::new(),
+            })
+        })
+        .collect::<Result<_, tokio_postgres::Error>>()?;
+    let index_by_id: HashMap<i64, usize> = setups
+        .iter()
+        .enumerate()
+        .map(|(i, setup)| (setup.id, i))
+        .collect();
+    for row in loadout_rows {
+        let setup_id: i64 = row.try_get("setup_id")?;
+        if let Some(&i) = index_by_id.get(&setup_id) {
+            setups[i].members.insert(
+                row.try_get("member_name")?,
+                MemberLoadout {
+                    equipment: row.try_get("equipment")?,
+                    inventory: row.try_get("inventory")?,
+                },
+            );
+        }
+    }
+
+    Ok(setups)
+}
+
+pub async fn create_loadout_setup(
+    client: &Client,
+    group_id: i64,
+    name: &str,
+) -> Result<LoadoutSetup, ApiError> {
+    let row = client
+        .query_opt(
+            r#"
+INSERT INTO groupironman.loadout_setups (group_id, name)
+SELECT $1, $2
+WHERE (SELECT COUNT(*) FROM groupironman.loadout_setups WHERE group_id=$1) < $3
+RETURNING setup_id, version
+"#,
+            &[&group_id, &name, &MAX_LOADOUT_SETUPS_PER_GROUP],
+        )
+        .await?;
+    let Some(row) = row else {
+        return Err(ApiError::LoadoutValidationError(format!(
+            "A group can have at most {} loadout setups",
+            MAX_LOADOUT_SETUPS_PER_GROUP
+        )));
+    };
+
+    Ok(LoadoutSetup {
+        id: row.try_get("setup_id")?,
+        name: name.to_owned(),
+        version: row.try_get("version")?,
+        members: HashMap::new(),
+    })
+}
+
+// Replaces a setup's name and loadouts. The caller's version must match the stored one so two
+// people editing the same setup can't silently overwrite each other.
+pub async fn update_loadout_setup(
+    client: &mut Client,
+    group_id: i64,
+    setup_id: i64,
+    update: &UpdateLoadoutSetup,
+) -> Result<(), ApiError> {
+    let transaction = client.transaction().await?;
+    let row = transaction
+        .query_opt(
+            "SELECT version FROM groupironman.loadout_setups WHERE setup_id=$1 AND group_id=$2 FOR UPDATE",
+            &[&setup_id, &group_id],
+        )
+        .await?;
+    let Some(row) = row else {
+        return Err(ApiError::LoadoutNotFound);
+    };
+    let version: i32 = row.try_get("version")?;
+    if version != update.version {
+        return Err(ApiError::LoadoutVersionConflict);
+    }
+
+    let member_rows = transaction
+        .query(
+            "SELECT member_id, member_name::TEXT AS member_name FROM groupironman.members WHERE group_id=$1 AND member_name<>$2",
+            &[&group_id, &SHARED_MEMBER],
+        )
+        .await?;
+    // member_name is CITEXT, so match names case-insensitively
+    let mut member_ids: HashMap<String, i64> = HashMap::new();
+    for row in member_rows {
+        let name: String = row.try_get("member_name")?;
+        member_ids.insert(name.to_lowercase(), row.try_get("member_id")?);
+    }
+
+    transaction
+        .execute(
+            "UPDATE groupironman.loadout_setups SET name=$1, version=version+1, updated_at=NOW() WHERE setup_id=$2",
+            &[&update.name, &setup_id],
+        )
+        .await?;
+    transaction
+        .execute(
+            "DELETE FROM groupironman.loadouts WHERE setup_id=$1",
+            &[&setup_id],
+        )
+        .await?;
+    let insert_stmt = transaction
+        .prepare_cached(
+            "INSERT INTO groupironman.loadouts (setup_id, member_id, equipment, inventory) VALUES ($1, $2, $3, $4)",
+        )
+        .await?;
+    for (member_name, loadout) in &update.members {
+        let Some(member_id) = member_ids.get(&member_name.to_lowercase()) else {
+            return Err(ApiError::LoadoutValidationError(format!(
+                "{} is not a member of this group",
+                member_name
+            )));
+        };
+        transaction
+            .execute(
+                &insert_stmt,
+                &[&setup_id, member_id, &loadout.equipment, &loadout.inventory],
+            )
+            .await?;
+    }
+
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn delete_loadout_setup(
+    client: &Client,
+    group_id: i64,
+    setup_id: i64,
+) -> Result<(), ApiError> {
+    let deleted = client
+        .execute(
+            "DELETE FROM groupironman.loadout_setups WHERE setup_id=$1 AND group_id=$2",
+            &[&setup_id, &group_id],
+        )
+        .await?;
+    if deleted == 0 {
+        return Err(ApiError::LoadoutNotFound);
+    }
+    Ok(())
+}
+
+// Members without a saved position (e.g. added since the order was set) go last, by name
+pub async fn get_member_order(client: &Client, group_id: i64) -> Result<Vec<String>, ApiError> {
+    let rows = client
+        .query(
+            r#"
+SELECT member_name::TEXT AS member_name FROM groupironman.members
+WHERE group_id=$1 AND member_name<>$2
+ORDER BY display_order ASC NULLS LAST, member_name ASC
+"#,
+            &[&group_id, &SHARED_MEMBER],
+        )
+        .await?;
+    rows.iter()
+        .map(|row| row.try_get("member_name").map_err(ApiError::from))
+        .collect()
+}
+
+pub async fn set_member_order(
+    client: &mut Client,
+    group_id: i64,
+    member_names: &[String],
+) -> Result<(), ApiError> {
+    let transaction = client.transaction().await?;
+    let rows = transaction
+        .query(
+            "SELECT member_id, member_name::TEXT AS member_name FROM groupironman.members WHERE group_id=$1 AND member_name<>$2",
+            &[&group_id, &SHARED_MEMBER],
+        )
+        .await?;
+    // member_name is CITEXT, so match names case-insensitively
+    let mut member_ids: HashMap<String, i64> = HashMap::new();
+    for row in rows {
+        let name: String = row.try_get("member_name")?;
+        member_ids.insert(name.to_lowercase(), row.try_get("member_id")?);
+    }
+
+    let mut seen = HashSet::new();
+    let mut ordered_ids = Vec::with_capacity(member_names.len());
+    for name in member_names {
+        let Some(&member_id) = member_ids.get(&name.to_lowercase()) else {
+            return Err(ApiError::GroupMemberValidationError(format!(
+                "{} is not a member of this group",
+                name
+            )));
+        };
+        if !seen.insert(member_id) {
+            return Err(ApiError::GroupMemberValidationError(format!(
+                "{} is listed more than once",
+                name
+            )));
+        }
+        ordered_ids.push(member_id);
+    }
+
+    transaction
+        .execute(
+            "UPDATE groupironman.members SET display_order=NULL WHERE group_id=$1",
+            &[&group_id],
+        )
+        .await?;
+    let stmt = transaction
+        .prepare_cached("UPDATE groupironman.members SET display_order=$1 WHERE member_id=$2")
+        .await?;
+    for (position, member_id) in ordered_ids.iter().enumerate() {
+        transaction
+            .execute(&stmt, &[&(position as i32), member_id])
+            .await?;
+    }
+    transaction.commit().await?;
     Ok(())
 }
