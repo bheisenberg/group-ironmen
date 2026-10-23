@@ -108,6 +108,10 @@ export class GearPage extends BaseElement {
 
     this.eventListener(this, "click", this.handleClick.bind(this));
     this.eventListener(this, "contextmenu", this.handleContextMenu.bind(this), { passive: false });
+    this.eventListener(this, "dragstart", this.handleDragStart.bind(this));
+    this.eventListener(this, "dragover", this.handleDragOver.bind(this), { passive: false });
+    this.eventListener(this, "drop", this.handleDrop.bind(this), { passive: false });
+    this.eventListener(this, "dragend", this.handleDragEnd.bind(this));
     this.eventListener(this.setupSelect, "change", this.handleSetupChange.bind(this));
     this.eventListener(this.setupNameInput, "input", this.handleSetupNameInput.bind(this));
     this.eventListener(this.searchElement, "input", () => this.renderPicker());
@@ -233,14 +237,95 @@ export class GearPage extends BaseElement {
     return POOL_BY_ITEM.get(itemId)?.forms.filter((form) => form !== itemId) || [];
   }
 
+  // A location is a selection ({ kind, slot } or { kind, index }), optionally with a member
+  allowsQuantity(location) {
+    return location.kind === "inventory" || [WEAPON_SLOT, AMMO_SLOT].includes(location.slot);
+  }
+
+  fitsLocation(itemId, location) {
+    return location.kind === "inventory" || this.itemSlots.slots[itemId] === location.slot;
+  }
+
   selectionAllowsQuantity() {
-    if (!this.selection) return false;
-    return this.selection.kind === "inventory" || [WEAPON_SLOT, AMMO_SLOT].includes(this.selection.slot);
+    return !!this.selection && this.allowsQuantity(this.selection);
   }
 
   fitsSelection(itemId) {
-    if (this.selection.kind === "inventory") return true;
-    return this.itemSlots.slots[itemId] === this.selection.slot;
+    return this.fitsLocation(itemId, this.selection);
+  }
+
+  // Moves the item at one member's slot to another slot, possibly another member's. Dropping
+  // onto the same item stacks them where quantities are allowed, onto a different item swaps
+  // the two, and a stack dropped on a single-item slot like Head moves just one. Returns
+  // whether the move is allowed; with dryRun nothing is changed.
+  moveItem(from, to, dryRun = false) {
+    if (from.member === to.member && from.kind === to.kind && from.slot === to.slot && from.index === to.index) {
+      return false;
+    }
+    const fromLoadout = this.loadoutFor(from.member);
+    if (!fromLoadout || !this.memberNames.includes(to.member)) return false;
+    const [fromArray, fromIndex] = this.slotLocation(fromLoadout, from);
+    const [itemId, quantity] = [fromArray[fromIndex], fromArray[fromIndex + 1]];
+    if (!itemId || !this.fitsLocation(itemId, to)) return false;
+
+    const toLoadout = this.loadoutFor(to.member, !dryRun) || emptyLoadout();
+    const [toArray, toIndex] = this.slotLocation(toLoadout, to);
+    const [targetId, targetQuantity] = [toArray[toIndex], toArray[toIndex + 1]];
+
+    let apply;
+    if (targetId === itemId && this.allowsQuantity(to)) {
+      apply = () => {
+        toArray[toIndex + 1] += quantity;
+        fromArray[fromIndex] = fromArray[fromIndex + 1] = 0;
+      };
+    } else if (quantity > 1 && !this.allowsQuantity(to)) {
+      if (targetId) return false;
+      apply = () => {
+        toArray[toIndex] = itemId;
+        toArray[toIndex + 1] = 1;
+        fromArray[fromIndex + 1] = quantity - 1;
+      };
+    } else {
+      if (targetId && !this.fitsLocation(targetId, from)) return false;
+      if (targetId && targetQuantity > 1 && !this.allowsQuantity(from)) return false;
+      apply = () => {
+        toArray[toIndex] = itemId;
+        toArray[toIndex + 1] = quantity;
+        fromArray[fromIndex] = targetId;
+        fromArray[fromIndex + 1] = targetId ? targetQuantity : 0;
+      };
+    }
+    if (dryRun) return true;
+
+    apply();
+    if (to.kind === "equipment") this.resolveTwoHanded(toLoadout, to.slot, itemId, from, fromArray, fromIndex);
+    if (from.kind === "equipment" && fromArray[fromIndex]) {
+      this.applyTwoHandedRule(fromLoadout, from.slot, fromArray[fromIndex]);
+    }
+    return true;
+  }
+
+  // A two-handed weapon and a shield can't be worn together. Like unequipping in game, the one
+  // that has to come off goes where the dragged item came from if that slot is now free and it
+  // fits there, otherwise it's removed from the loadout.
+  resolveTwoHanded(loadout, slot, itemId, from, fromArray, fromIndex) {
+    const twoHanded = this.itemSlots.twoHanded;
+    let conflictSlot = null;
+    if (slot === WEAPON_SLOT && twoHanded.has(itemId)) conflictSlot = SHIELD_SLOT;
+    if (slot === SHIELD_SLOT && twoHanded.has(loadout.equipment[WEAPON_SLOT * 2])) conflictSlot = WEAPON_SLOT;
+    if (conflictSlot === null) return;
+
+    const [displacedId, displacedQuantity] = loadout.equipment.slice(conflictSlot * 2, conflictSlot * 2 + 2);
+    if (!displacedId) return;
+    this.setSlot(loadout, { kind: "equipment", slot: conflictSlot }, 0, 0);
+    const fits =
+      fromArray[fromIndex] === 0 &&
+      this.fitsLocation(displacedId, from) &&
+      (displacedQuantity === 1 || this.allowsQuantity(from));
+    if (fits) {
+      fromArray[fromIndex] = displacedId;
+      fromArray[fromIndex + 1] = displacedQuantity;
+    }
   }
 
   setSlot(loadout, selection, itemId, quantity) {
@@ -506,12 +591,68 @@ export class GearPage extends BaseElement {
     input.select();
   }
 
+  locationFromElement(el) {
+    const member = el.getAttribute("data-member");
+    return el.getAttribute("data-kind") === "equipment"
+      ? { member, kind: "equipment", slot: parseInt(el.getAttribute("data-slot")) }
+      : { member, kind: "inventory", index: parseInt(el.getAttribute("data-index")) };
+  }
+
   selectSlotElement(el) {
-    this.selectedMember = el.getAttribute("data-member");
-    this.selection =
-      el.getAttribute("data-kind") === "equipment"
-        ? { kind: "equipment", slot: parseInt(el.getAttribute("data-slot")) }
-        : { kind: "inventory", index: parseInt(el.getAttribute("data-index")) };
+    const { member, ...selection } = this.locationFromElement(el);
+    this.selectedMember = member;
+    this.selection = selection;
+  }
+
+  // ---- Dragging items between slots ----
+
+  handleDragStart(event) {
+    const slot = event.target.closest?.('.gear-page__slot[draggable="true"]');
+    if (!slot) return;
+    this.closeContextMenu();
+    this.dragSource = this.locationFromElement(slot);
+    slot.classList.add("dragging");
+    event.dataTransfer.effectAllowed = "move";
+    // Firefox won't start a drag without some data
+    event.dataTransfer.setData("text/plain", "");
+  }
+
+  handleDragOver(event) {
+    if (!this.dragSource) return;
+    const slot = event.target.closest(".gear-page__slot");
+    this.setDropTarget(slot);
+    if (slot && this.moveItem(this.dragSource, this.locationFromElement(slot), true)) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      slot.classList.add("drop-ok");
+    }
+  }
+
+  handleDrop(event) {
+    if (!this.dragSource) return;
+    event.preventDefault();
+    const slot = event.target.closest(".gear-page__slot");
+    const from = this.dragSource;
+    this.handleDragEnd();
+    if (!slot) return;
+    const to = this.locationFromElement(slot);
+    if (this.moveItem(from, to)) {
+      const { member, ...selection } = to;
+      this.selectedMember = member;
+      this.selection = selection;
+      this.changed();
+    }
+  }
+
+  handleDragEnd() {
+    this.dragSource = null;
+    this.setDropTarget(null);
+    this.querySelectorAll(".gear-page__slot.dragging").forEach((el) => el.classList.remove("dragging"));
+  }
+
+  setDropTarget(slot) {
+    if (this.dropTarget && this.dropTarget !== slot) this.dropTarget.classList.remove("drop-ok");
+    this.dropTarget = slot;
   }
 
   handleSetupChange() {
@@ -682,8 +823,9 @@ export class GearPage extends BaseElement {
       const itemId = loadout.equipment[slot * 2];
       const selected = isSelectedMember && this.selection?.kind === "equipment" && this.selection.slot === slot;
       return `<div class="equipment-slot ${className} gear-page__slot ${selected ? "selected" : ""}" title="${name}"
+        draggable="${itemId ? "true" : "false"}"
         data-action="select-slot" data-member="${member}" data-kind="equipment" data-slot="${slot}">
-        ${itemId ? this.slotHtml(itemId, loadout.equipment[slot * 2 + 1], used) : `<img src="/ui/${emptyImage}" />`}
+        ${itemId ? this.slotHtml(itemId, loadout.equipment[slot * 2 + 1], used) : `<img src="/ui/${emptyImage}" draggable="false" />`}
       </div>`;
     }).join("");
   }
@@ -695,6 +837,7 @@ export class GearPage extends BaseElement {
     for (let index = 0; index < INVENTORY_SIZE; ++index) {
       const selected = isSelectedMember && this.selection?.kind === "inventory" && this.selection.index === index;
       html += `<div class="gear-page__inventory-cell gear-page__slot ${selected ? "selected" : ""}"
+        draggable="${loadout.inventory[index * 2] ? "true" : "false"}"
         data-action="select-slot" data-member="${member}" data-kind="inventory" data-index="${index}">
         ${this.slotHtml(loadout.inventory[index * 2], loadout.inventory[index * 2 + 1], used)}
       </div>`;
@@ -713,7 +856,7 @@ export class GearPage extends BaseElement {
     }
     if (!this.selection || !this.selectedMember) {
       this.pickerHeadEl.innerHTML = `<h3>Choose a slot</h3>
-        <p>Click an equipment or inventory slot, then pick from the group's items. Right-click a slot for more options.</p>`;
+        <p>Click an equipment or inventory slot, then pick from the group's items. Drag items between slots to move or swap them, and right-click a slot for more options.</p>`;
       this.pickerListEl.innerHTML = "";
       return;
     }

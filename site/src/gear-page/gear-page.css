@@ -84,6 +84,15 @@
   outline-offset: -2px;
 }
 
+.gear-page__slot.dragging {
+  opacity: 0.4;
+}
+
+.gear-page__slot.drop-ok {
+  outline: 2px dashed var(--orange);
+  outline-offset: -2px;
+}
+
 .gear-page__over {
   filter: drop-shadow(0 0 3px var(--red));
 }

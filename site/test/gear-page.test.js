@@ -202,6 +202,81 @@ describe("gear page", () => {
     expect(page.loadoutFor("Alice").equipment.slice(6, 8)).toEqual([WHIP, 1]);
   });
 
+  describe("dragging", () => {
+    const HELM = 10828;
+    const at = (member, kind, n) => (kind === "equipment" ? { member, kind, slot: n } : { member, kind, index: n });
+    const slot = (page, member, kind, n) => {
+      const loadout = page.loadoutFor(member);
+      const array = kind === "equipment" ? loadout.equipment : loadout.inventory;
+      return array.slice(n * 2, n * 2 + 2);
+    };
+    const dragPage = (members) => {
+      const page = makePage({ owned: {}, members });
+      page.itemSlots.slots[HELM] = 0;
+      return page;
+    };
+
+    it("moves an item from the inventory into the slot it fits", () => {
+      const page = dragPage({ Alice: loadoutWith({ inventory: { 4: [WHIP, 1] } }) });
+      expect(page.moveItem(at("Alice", "inventory", 4), at("Alice", "equipment", 3))).toBe(true);
+      expect(slot(page, "Alice", "equipment", 3)).toEqual([WHIP, 1]);
+      expect(slot(page, "Alice", "inventory", 4)).toEqual([0, 0]);
+    });
+
+    it("refuses a slot the item doesn't fit, without changing anything", () => {
+      const page = dragPage({ Alice: loadoutWith({ inventory: { 0: [SHARK, 5] } }) });
+      expect(page.moveItem(at("Alice", "inventory", 0), at("Alice", "equipment", 0), true)).toBe(false);
+      expect(page.moveItem(at("Alice", "inventory", 0), at("Alice", "equipment", 0))).toBe(false);
+      expect(slot(page, "Alice", "inventory", 0)).toEqual([SHARK, 5]);
+    });
+
+    it("swaps items between members", () => {
+      const page = dragPage({
+        Alice: loadoutWith({ equipment: { 3: [WHIP, 1] } }),
+        Bob: loadoutWith({ equipment: { 3: [PURGING_STAFF, 1] } }),
+      });
+      expect(page.moveItem(at("Alice", "equipment", 3), at("Bob", "equipment", 3))).toBe(true);
+      expect(slot(page, "Alice", "equipment", 3)).toEqual([PURGING_STAFF, 1]);
+      expect(slot(page, "Bob", "equipment", 3)).toEqual([WHIP, 1]);
+    });
+
+    it("gives a member without a loadout one when an item is dropped on them", () => {
+      const page = dragPage({ Alice: loadoutWith({ inventory: { 0: [SHARK, 3] } }) });
+      expect(page.moveItem(at("Alice", "inventory", 0), at("Bob", "inventory", 27))).toBe(true);
+      expect(slot(page, "Bob", "inventory", 27)).toEqual([SHARK, 3]);
+    });
+
+    it("refuses a swap when the other item can't go where the dragged one came from", () => {
+      const page = dragPage({ Alice: loadoutWith({ equipment: { 3: [WHIP, 1] }, inventory: { 0: [SHARK, 1] } }) });
+      expect(page.moveItem(at("Alice", "equipment", 3), at("Alice", "inventory", 0))).toBe(false);
+      expect(slot(page, "Alice", "equipment", 3)).toEqual([WHIP, 1]);
+    });
+
+    it("stacks the same item where quantities are allowed", () => {
+      const page = dragPage({ Alice: loadoutWith({ inventory: { 0: [SHARK, 2], 1: [SHARK, 3] } }) });
+      expect(page.moveItem(at("Alice", "inventory", 0), at("Alice", "inventory", 1))).toBe(true);
+      expect(slot(page, "Alice", "inventory", 1)).toEqual([SHARK, 5]);
+      expect(slot(page, "Alice", "inventory", 0)).toEqual([0, 0]);
+    });
+
+    it("moves one of a stack onto a single-item slot and leaves the rest", () => {
+      const page = dragPage({ Alice: loadoutWith({ inventory: { 0: [HELM, 3] } }) });
+      expect(page.moveItem(at("Alice", "inventory", 0), at("Alice", "equipment", 0))).toBe(true);
+      expect(slot(page, "Alice", "equipment", 0)).toEqual([HELM, 1]);
+      expect(slot(page, "Alice", "inventory", 0)).toEqual([HELM, 2]);
+    });
+
+    it("puts the shield where a two-handed weapon was dragged from", () => {
+      const page = dragPage({
+        Alice: loadoutWith({ equipment: { 5: [DEFENDER, 1] }, inventory: { 6: [GODSWORD, 1] } }),
+      });
+      expect(page.moveItem(at("Alice", "inventory", 6), at("Alice", "equipment", 3))).toBe(true);
+      expect(slot(page, "Alice", "equipment", 3)).toEqual([GODSWORD, 1]);
+      expect(slot(page, "Alice", "equipment", 5)).toEqual([0, 0]);
+      expect(slot(page, "Alice", "inventory", 6)).toEqual([DEFENDER, 1]);
+    });
+  });
+
   it("does not save until Save is clicked", async () => {
     vi.useFakeTimers();
     const page = makePage({ owned: { [WHIP]: 1 } });
