@@ -74,9 +74,7 @@ const TAG_TAB_EQUIPMENT_CELLS = {
 };
 const TAG_TAB_INVENTORY_COLUMN = 4;
 
-// A loadout as a RuneLite bank tag tab, for its "Import tag tab" option. Format:
-// banktags,1,<name>,<icon item>,layout,<position>,<item>,<position>,<item>,...
-export function tagTabExport(name, loadout) {
+function equipmentScreenLayout(loadout) {
   const layout = [];
   for (const [slot, [row, column]] of Object.entries(TAG_TAB_EQUIPMENT_CELLS)) {
     const itemId = loadout.equipment[slot * 2];
@@ -88,6 +86,39 @@ export function tagTabExport(name, loadout) {
     const column = TAG_TAB_INVENTORY_COLUMN + (index % 4);
     if (itemId) layout.push([row * BANK_ROW_LENGTH + column, itemId]);
   }
+  return layout;
+}
+
+// The Inventory Setups plugin's ZigZag layout, with its default top to bottom order: items go
+// down and up pairs of rows (0, 8, 1, 9, ...), equipment in slot order from the top, then the
+// quiver's ammo, and the inventory from the third row
+const ZIGZAG_INVENTORY_START = 2 * BANK_ROW_LENGTH;
+function zigzagPosition(n) {
+  const pairOfRows = Math.floor(n / (2 * BANK_ROW_LENGTH));
+  const inPair = n % (2 * BANK_ROW_LENGTH);
+  return pairOfRows * 2 * BANK_ROW_LENGTH + (inPair % 2) * BANK_ROW_LENGTH + Math.floor(inPair / 2);
+}
+
+function zigzagLayout(loadout) {
+  const layout = [];
+  const equipment = [];
+  for (let slot = 0; slot < QUIVER_SLOT; ++slot) {
+    if (loadout.equipment[slot * 2]) equipment.push(loadout.equipment[slot * 2]);
+  }
+  if (loadout.equipment[QUIVER_SLOT * 2]) equipment.push(loadout.equipment[QUIVER_SLOT * 2]);
+  equipment.forEach((itemId, n) => layout.push([zigzagPosition(n), itemId]));
+  const inventory = [];
+  for (let index = 0; index < INVENTORY_SIZE; ++index) {
+    if (loadout.inventory[index * 2]) inventory.push(loadout.inventory[index * 2]);
+  }
+  inventory.forEach((itemId, n) => layout.push([ZIGZAG_INVENTORY_START + zigzagPosition(n), itemId]));
+  return layout;
+}
+
+// A loadout as a RuneLite bank tag tab, for its "Import tag tab" option. Format:
+// banktags,1,<name>,<icon item>,layout,<position>,<item>,<position>,<item>,...
+export function tagTabExport(name, loadout, zigzag = false) {
+  const layout = zigzag ? zigzagLayout(loadout) : equipmentScreenLayout(loadout);
   if (layout.length === 0) return null;
 
   // Tag names can't have RuneLite's markup characters, or commas since the export is comma separated
@@ -282,10 +313,22 @@ export class GearPage extends BaseElement {
     if (url.href !== window.location.href) window.history.replaceState(window.history.state, "", url);
   }
 
-  async copyTagTab(member) {
+  // The export button's dropdown, which reuses the right-click menu, under the button
+  openExportMenu(button) {
+    const member = utility.escapeHtml(button.getAttribute("data-member"));
+    this.contextMenu.innerHTML = `
+      <button type="button" data-action="export-tag-tab" data-member="${member}">Equipment screen layout</button>
+      <button type="button" data-action="export-tag-tab" data-zigzag data-member="${member}">Zigzag layout (Inventory Setups)</button>`;
+    const rect = button.getBoundingClientRect();
+    this.contextMenu.style.left = `${rect.left}px`;
+    this.contextMenu.style.top = `${rect.bottom}px`;
+    this.contextMenu.classList.add("open");
+  }
+
+  async copyTagTab(member, zigzag) {
     const setup = this.currentSetup;
     const loadout = this.loadoutFor(member);
-    const exported = setup && loadout && tagTabExport(`${setup.name} ${member}`, loadout);
+    const exported = setup && loadout && tagTabExport(`${setup.name} ${member}`, loadout, zigzag);
     if (!exported) {
       this.setStatus(`${member} has nothing to export in this setup`, true);
       return;
@@ -810,7 +853,9 @@ export class GearPage extends BaseElement {
     } else if (action === "copy-link") {
       this.copySetupLink();
     } else if (action === "export-tag-tab") {
-      this.copyTagTab(target.getAttribute("data-member"));
+      this.copyTagTab(target.getAttribute("data-member"), target.hasAttribute("data-zigzag"));
+    } else if (action === "export-menu") {
+      this.openExportMenu(target);
     } else if (action === "hide-member") {
       this.hideMember(target.getAttribute("data-member"));
     } else if (action === "show-member") {
@@ -1234,8 +1279,13 @@ export class GearPage extends BaseElement {
             <div class="player-inventory__inventory">${this.inventoryHtml(loadout, used, name)}</div>
           </div>
           <div class="gear-page__overview-foot">
-            <button class="men-button small" type="button" data-action="export-tag-tab" data-member="${escapedName}"
-              title="Copy as a RuneLite bank tag tab" ${isEmptyLoadout(loadout) ? "disabled" : ""}>Export</button>
+            <div class="gear-page__overview-exports">
+              <button class="men-button small" type="button" data-action="export-tag-tab" data-member="${escapedName}"
+                title="Copy as a RuneLite bank tag tab laid out like the equipment screen and inventory"
+                ${isEmptyLoadout(loadout) ? "disabled" : ""}>Export</button>
+              <button class="men-button small" type="button" data-action="export-menu" data-member="${escapedName}"
+                title="More export layouts" ${isEmptyLoadout(loadout) ? "disabled" : ""}>&#9662;</button>
+            </div>
             <button class="men-button small" type="button" data-action="hide-member" data-member="${escapedName}"
               title="Remove ${escapedName} from this setup">Remove</button>
           </div>

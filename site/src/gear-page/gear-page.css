@@ -288,6 +288,15 @@
   box-shadow: 4px 0 0 var(--orange);
 }
 
+/* A split button: Export, and an arrow for the other layouts */
+.gear-page__overview-exports {
+  display: flex;
+}
+
+.gear-page__overview-exports button + button {
+  margin-left: -1px;
+}
+
 .gear-page__overview-foot {
   display: flex;
   justify-content: space-between;

@@ -481,6 +481,23 @@ describe("gear page", () => {
       );
     });
 
+    it("zigzags equipment down and up pairs of rows, then the inventory from the third row", () => {
+      const loadout = loadoutWith({
+        equipment: { 0: [10828, 1], 3: [WHIP, 1], 13: [ARROW, 100], 14: [ARROW + 1, 50] },
+        inventory: { 0: [SHARK, 1], 5: [SHARK, 1], 9: [GODSWORD, 1] },
+      });
+      // Equipment: head, weapon, ammo, quiver at 0, 8, 1, 9. Inventory at 16, 24, 17.
+      expect(tagTabExport("ToB", loadout, true)).toBe(
+        `banktags,1,ToB,${WHIP},layout,0,10828,8,${WHIP},1,${ARROW},9,${ARROW + 1},16,${SHARK},24,${SHARK},17,${GODSWORD}`
+      );
+    });
+
+    it("starts a new pair of rows after 16 items", () => {
+      const inventory = Object.fromEntries(Array.from({ length: 18 }, (_, i) => [i, [SHARK, 1]]));
+      const positions = tagTabExport("x", loadoutWith({ inventory }), true).split(",").slice(5).filter((_, i) => i % 2 === 0);
+      expect(positions.slice(14).map(Number)).toEqual([23, 31, 32, 40]);
+    });
+
     it("exports nothing for an empty loadout", () => {
       expect(tagTabExport("ToB", loadoutWith())).toBeNull();
     });
