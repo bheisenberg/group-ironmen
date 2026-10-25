@@ -385,22 +385,38 @@ describe("gear page", () => {
     it("reorders members for the setup", () => {
       const page = makePage({ owned: {} });
       expect(page.visibleMembers).toEqual(["Alice", "Bob"]);
-      page.moveMember("Bob", -1);
+      page.moveMember("Bob", "Alice", false);
       expect(page.visibleMembers).toEqual(["Bob", "Alice"]);
       expect(page.savableLayout(page.currentSetup).member_order).toEqual(["Bob", "Alice"]);
+      page.moveMember("Bob", "Alice", true);
+      expect(page.visibleMembers).toEqual(["Alice", "Bob"]);
     });
 
-    it("hides and shows a member without a loadout", () => {
+    it("removes a member after confirming and adds them back", async () => {
+      const { confirmDialogManager } = await import("../src/confirm-dialog/confirm-dialog-manager");
+      const confirm = vi.spyOn(confirmDialogManager, "confirm").mockImplementation(({ yesCallback }) => yesCallback());
       const page = makePage({ owned: {} });
       page.hideMember("Alice");
+      expect(confirm).toHaveBeenCalled();
       expect(page.visibleMembers).toEqual(["Bob"]);
       expect(page.hiddenMembers).toEqual(["Alice"]);
       expect(page.selectedMember).toBe("Bob");
       page.showMember("Alice");
       expect(page.visibleMembers).toEqual(["Alice", "Bob"]);
+      confirm.mockRestore();
     });
 
-    it("asks before hiding a member with a loadout, then clears it", async () => {
+    it("keeps a member when removing them is cancelled", async () => {
+      const { confirmDialogManager } = await import("../src/confirm-dialog/confirm-dialog-manager");
+      const confirm = vi.spyOn(confirmDialogManager, "confirm").mockImplementation(({ noCallback }) => noCallback());
+      const page = makePage({ owned: {}, members: { Bob: loadoutWith({ equipment: { 3: [WHIP, 1] } }) } });
+      page.hideMember("Bob");
+      expect(page.visibleMembers).toEqual(["Alice", "Bob"]);
+      expect(page.currentSetup.members.Bob.equipment[6]).toBe(WHIP);
+      confirm.mockRestore();
+    });
+
+    it("clears a removed member's loadout", async () => {
       const { confirmDialogManager } = await import("../src/confirm-dialog/confirm-dialog-manager");
       const confirm = vi.spyOn(confirmDialogManager, "confirm").mockImplementation(({ yesCallback }) => yesCallback());
       const page = makePage({ owned: {}, members: { Bob: loadoutWith({ equipment: { 3: [WHIP, 1] } }) } });

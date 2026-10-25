@@ -815,8 +815,6 @@ export class GearPage extends BaseElement {
       this.hideMember(target.getAttribute("data-member"));
     } else if (action === "show-member") {
       this.showMember(target.getAttribute("data-member"));
-    } else if (action === "move-member") {
-      this.moveMember(target.getAttribute("data-member"), parseInt(target.getAttribute("data-move")));
     } else if (action === "select-member") {
       this.view = "edit";
       this.selectedMember = target.getAttribute("data-member");
@@ -847,7 +845,8 @@ export class GearPage extends BaseElement {
 
   // ---- Member layout ----
 
-  // Hiding a member clears their loadout, so nothing hidden counts toward the group's items
+  // Removing (hiding) a member clears their loadout, so nothing hidden counts toward the group's
+  // items. They can be added back from the members bar.
   hideMember(member) {
     const setup = this.currentSetup;
     if (!setup || !this.visibleMembers.includes(member)) return;
@@ -861,13 +860,12 @@ export class GearPage extends BaseElement {
       this.changed();
     };
     const loadout = setup.members[member];
-    if (!loadout || isEmptyLoadout(loadout)) {
-      hide();
-      return;
-    }
+    const hasLoadout = loadout && !isEmptyLoadout(loadout);
     confirmDialogManager.confirm({
-      headline: `Hide ${member}?`,
-      body: `${member}'s loadout in ${setup.name} will be cleared.`,
+      headline: `Remove ${member} from ${setup.name}?`,
+      body: hasLoadout
+        ? `${member}'s loadout in this setup will be cleared. They can be added back from the buttons at the top.`
+        : "They can be added back from the buttons at the top.",
       yesCallback: hide,
       noCallback: () => {},
     });
@@ -880,14 +878,13 @@ export class GearPage extends BaseElement {
     this.changed();
   }
 
-  // Moves a member one place left (-1) or right (1) among the shown members
-  moveMember(member, direction) {
+  // Moves a member just before or after another among the shown members
+  moveMember(member, target, after) {
     const setup = this.currentSetup;
-    const order = this.visibleMembers;
-    const from = order.indexOf(member);
-    const to = from + direction;
-    if (!setup || from < 0 || to < 0 || to >= order.length) return;
-    [order[from], order[to]] = [order[to], order[from]];
+    const order = this.visibleMembers.filter((name) => name !== member);
+    const targetIndex = order.indexOf(target);
+    if (!setup || member === target || targetIndex < 0) return;
+    order.splice(targetIndex + (after ? 1 : 0), 0, member);
     setup.member_order = order;
     this.changed();
   }
@@ -962,6 +959,17 @@ export class GearPage extends BaseElement {
   // ---- Dragging items between slots ----
 
   handleDragStart(event) {
+    // Dragging a member's card by its name reorders the members
+    const cardHead = event.target.closest?.(".gear-page__overview-head");
+    if (cardHead) {
+      const card = cardHead.closest(".gear-page__overview-card");
+      this.closeContextMenu();
+      this.dragSource = { card: card.getAttribute("data-member") };
+      card.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", "");
+      return;
+    }
     const pick = event.target.closest?.(".gear-page__pick");
     const slot = event.target.closest?.('.gear-page__slot[draggable="true"]');
     if (!pick && !slot) return;
@@ -976,6 +984,15 @@ export class GearPage extends BaseElement {
 
   handleDragOver(event) {
     if (!this.dragSource) return;
+    if (this.dragSource.card !== undefined) {
+      const drop = this.cardDropPosition(event);
+      this.setCardDropTarget(drop);
+      if (drop) {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+      }
+      return;
+    }
     const slot = event.target.closest(".gear-page__slot");
     this.setDropTarget(slot);
     if (slot && this.dropItem(this.dragSource, this.locationFromElement(slot), true)) {
@@ -988,8 +1005,14 @@ export class GearPage extends BaseElement {
   handleDrop(event) {
     if (!this.dragSource) return;
     event.preventDefault();
-    const slot = event.target.closest(".gear-page__slot");
     const from = this.dragSource;
+    if (from.card !== undefined) {
+      const drop = this.cardDropPosition(event);
+      this.handleDragEnd();
+      if (drop) this.moveMember(from.card, drop.card.getAttribute("data-member"), drop.after);
+      return;
+    }
+    const slot = event.target.closest(".gear-page__slot");
     this.handleDragEnd();
     if (!slot) return;
     const to = this.locationFromElement(slot);
@@ -1009,9 +1032,28 @@ export class GearPage extends BaseElement {
       : this.moveItem(from, to, dryRun);
   }
 
+  // The card a dragged card is over, and which half, so it drops before or after it
+  cardDropPosition(event) {
+    const card = event.target.closest(".gear-page__overview-card");
+    if (!card || card.getAttribute("data-member") === this.dragSource.card) return null;
+    const rect = card.getBoundingClientRect();
+    return { card, after: event.clientX > rect.left + rect.width / 2 };
+  }
+
+  setCardDropTarget(drop) {
+    this.querySelectorAll(".gear-page__overview-card.drop-before, .gear-page__overview-card.drop-after").forEach(
+      (el) => {
+        if (el !== drop?.card) el.classList.remove("drop-before", "drop-after");
+      }
+    );
+    drop?.card.classList.toggle("drop-before", !drop.after);
+    drop?.card.classList.toggle("drop-after", drop.after);
+  }
+
   handleDragEnd() {
     this.dragSource = null;
     this.setDropTarget(null);
+    this.setCardDropTarget(null);
     this.querySelectorAll(".dragging").forEach((el) => el.classList.remove("dragging"));
   }
 
@@ -1178,29 +1220,24 @@ export class GearPage extends BaseElement {
       return;
     }
     this.overviewEl.innerHTML = visibleMembers
-      .map((name, i) => {
+      .map((name) => {
         const loadout = setup.members[name] || emptyLoadout();
         const escapedName = utility.escapeHtml(name);
         const editing = name === this.selectedMember && this.selection ? "gear-page__overview-card--editing" : "";
-        return `<div class="gear-page__overview-card ${editing} rsborder rsbackground">
-          <div class="gear-page__overview-head">
+        return `<div class="gear-page__overview-card ${editing} rsborder rsbackground" data-member="${escapedName}">
+          <div class="gear-page__overview-head" draggable="true" title="Drag to reorder">
             <h3>${escapedName}</h3>
-            <div class="gear-page__overview-actions">
-              <button class="men-button small" type="button" data-action="move-member" data-move="-1"
-                data-member="${escapedName}" title="Move left" ${i === 0 ? "disabled" : ""}>&lt;</button>
-              <button class="men-button small" type="button" data-action="move-member" data-move="1"
-                data-member="${escapedName}" title="Move right" ${
-          i === visibleMembers.length - 1 ? "disabled" : ""
-        }>&gt;</button>
-              <button class="men-button small" type="button" data-action="export-tag-tab" data-member="${escapedName}"
-                title="Copy as a RuneLite bank tag tab" ${isEmptyLoadout(loadout) ? "disabled" : ""}>Tag tab</button>
-              <button class="men-button small" type="button" data-action="hide-member" data-member="${escapedName}">Hide</button>
-            </div>
           </div>
           <div class="equipment">${this.equipmentHtml(loadout, used, name)}</div>
           <div class="gear-page__inventory">
             <div class="player-inventory__background"></div>
             <div class="player-inventory__inventory">${this.inventoryHtml(loadout, used, name)}</div>
+          </div>
+          <div class="gear-page__overview-foot">
+            <button class="men-button small" type="button" data-action="export-tag-tab" data-member="${escapedName}"
+              title="Copy as a RuneLite bank tag tab" ${isEmptyLoadout(loadout) ? "disabled" : ""}>Export</button>
+            <button class="men-button small" type="button" data-action="hide-member" data-member="${escapedName}"
+              title="Remove ${escapedName} from this setup">Remove</button>
           </div>
         </div>`;
       })

@@ -272,10 +272,26 @@
   width: 100%;
 }
 
-.gear-page__overview-actions {
+.gear-page__overview-head[draggable="true"] {
+  cursor: grab;
+}
+
+.gear-page__overview-card.dragging {
+  opacity: 0.5;
+}
+
+.gear-page__overview-card.drop-before {
+  box-shadow: -4px 0 0 var(--orange);
+}
+
+.gear-page__overview-card.drop-after {
+  box-shadow: 4px 0 0 var(--orange);
+}
+
+.gear-page__overview-foot {
   display: flex;
-  gap: 4px;
-  flex-shrink: 0;
+  justify-content: space-between;
+  width: 100%;
 }
 
 .gear-page__hidden-member {
