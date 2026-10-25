@@ -228,7 +228,8 @@ export class GearPage extends BaseElement {
   }
 
   // Untradeable items can't be passed between members (not even through group storage), so only
-  // the member holding one can use it. Synapse weapons are untradeable but are left out: they
+  // the member holding one can use it. Items that are only untradeable while charged (blowpipes,
+  // tridents, ...) aren't in the untradeable list to begin with. Synapse weapons are untradeable but are left out: they
   // can be dismantled into a tradeable synapse and made again.
   isOwnerOnly(itemId) {
     return !!this.itemSlots?.untradeable?.has(itemId) && !POOL_BY_ITEM.has(itemId);
