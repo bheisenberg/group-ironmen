@@ -291,10 +291,35 @@
 /* A split button: Export, and an arrow for the other layouts */
 .gear-page__overview-exports {
   display: flex;
+  border-image: url(/ui/border-button.png) 9 9 / 9px stretch;
+  border-style: solid;
+  border-radius: 4px;
+  background: #4d4336;
 }
 
-.gear-page__overview-exports button + button {
-  margin-left: -1px;
+.dark-mode .gear-page__overview-exports {
+  border-image: url(/ui/border-button-dark.png) 9 9 / 9px stretch;
+  background: #282828;
+}
+
+/* The halves share the wrapper's border, split by a divider */
+.gear-page__overview-exports button.men-button {
+  border: none;
+  border-image: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.gear-page__overview-exports button.men-button:hover {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.gear-page__overview-exports button.men-button:disabled {
+  background: #b5b5b5;
+}
+
+.gear-page__overview-exports button.men-button + button.men-button {
+  border-left: 1px solid rgba(0, 0, 0, 0.6);
 }
 
 .gear-page__overview-foot {

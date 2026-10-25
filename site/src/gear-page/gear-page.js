@@ -318,7 +318,7 @@ export class GearPage extends BaseElement {
     const member = utility.escapeHtml(button.getAttribute("data-member"));
     this.contextMenu.innerHTML = `
       <button type="button" data-action="export-tag-tab" data-member="${member}">Equipment screen layout</button>
-      <button type="button" data-action="export-tag-tab" data-zigzag data-member="${member}">Zigzag layout (Inventory Setups)</button>`;
+      <button type="button" data-action="export-tag-tab" data-zigzag data-member="${member}">Zigzag layout</button>`;
     const rect = button.getBoundingClientRect();
     this.contextMenu.style.left = `${rect.left}px`;
     this.contextMenu.style.top = `${rect.bottom}px`;
