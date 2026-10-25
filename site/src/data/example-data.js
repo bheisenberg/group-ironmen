@@ -275,16 +275,29 @@ class ExampleData {
 
   createLoadoutSetup(name) {
     if (!this.loadoutSetups) this.loadoutSetups = [];
-    const setup = { id: (this.nextLoadoutSetupId = (this.nextLoadoutSetupId || 0) + 1), name, version: 1, members: {} };
+    const setup = {
+      id: (this.nextLoadoutSetupId = (this.nextLoadoutSetupId || 0) + 1),
+      name,
+      version: 1,
+      members: {},
+      member_order: [],
+      hidden_members: [],
+    };
     this.loadoutSetups.push(setup);
     return clone(setup);
   }
 
-  updateLoadoutSetup({ id, name, version, members }) {
+  updateLoadoutSetup({ id, name, version, members, member_order = [], hidden_members = [] }) {
     const setup = this.loadoutSetups?.find((x) => x.id === id);
     if (!setup) return { ok: false, status: 404, data: "Loadout setup not found" };
     if (setup.version !== version) return { ok: false, status: 409, data: "Loadout setup was changed" };
-    Object.assign(setup, { name, version: version + 1, members: clone(members) });
+    Object.assign(setup, {
+      name,
+      version: version + 1,
+      members: clone(members),
+      member_order: clone(member_order),
+      hidden_members: clone(hidden_members),
+    });
     return { ok: true, status: 200, data: clone(setup) };
   }
 

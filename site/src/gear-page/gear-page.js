@@ -20,13 +20,18 @@ const EQUIPMENT_SLOTS = [
   { slot: 9, name: "Gloves", className: "equipment-gloves", emptyImage: "164-0.png" },
   { slot: 10, name: "Boots", className: "equipment-boots", emptyImage: "165-0.png" },
   { slot: 12, name: "Ring", className: "equipment-ring", emptyImage: "160-0.png" },
+  // Not a game slot: the ammo held by a worn Dizana's quiver, shown only while one is worn
+  { slot: 14, name: "Quiver", className: "gear-page__quiver-slot", emptyImage: "166-0.png" },
 ];
+const CAPE_SLOT = 1;
 const WEAPON_SLOT = 3;
 const SHIELD_SLOT = 5;
 const AMMO_SLOT = 13;
-const EQUIPMENT_SIZE = 14;
+const QUIVER_SLOT = 14;
+const EQUIPMENT_SIZE = 15;
 const INVENTORY_SIZE = 28;
 const MAX_PICKER_RESULTS = 120;
+const MAX_SETUP_NAME_LENGTH = 40;
 
 // Items that are really one item in different forms. They share a single limit, and a setup can
 // transform one form into another from the right-click menu. The Purging staff and Scorching bow
@@ -43,12 +48,64 @@ const POOL_BY_ITEM = new Map(
   ITEM_POOLS.flatMap((pool) => [...pool.forms, ...pool.alsoCounts].map((itemId) => [itemId, pool]))
 );
 
+// Capes with a quiver's extra ammo slot. Broken quivers can't hold ammo, so they're left out.
+const QUIVER_CAPES = new Set([
+  28947 /* Dizana's quiver (uncharged) */, 28949 /* Dizana's quiver (l) (uncharged) */, 28951 /* Dizana's quiver */,
+  28953 /* Dizana's quiver (l) */, 28955 /* Blessed Dizana's quiver */, 28957 /* Blessed Dizana's quiver (l) */,
+  28902 /* Dizana's max cape */, 28906 /* Dizana's max cape (l) */,
+]);
+
+// RuneLite bank tag tab layouts are 8 items wide. An exported loadout puts the equipment on the
+// left, laid out like the worn equipment screen, and the inventory's 4 columns on the right.
+const BANK_ROW_LENGTH = 8;
+const TAG_TAB_EQUIPMENT_CELLS = {
+  [QUIVER_SLOT]: [0, 0],
+  0: [0, 1],
+  1: [1, 0],
+  2: [1, 1],
+  13: [1, 2],
+  3: [2, 0],
+  4: [2, 1],
+  5: [2, 2],
+  7: [3, 1],
+  9: [4, 0],
+  10: [4, 1],
+  12: [4, 2],
+};
+const TAG_TAB_INVENTORY_COLUMN = 4;
+
+// A loadout as a RuneLite bank tag tab, for its "Import tag tab" option. Format:
+// banktags,1,<name>,<icon item>,layout,<position>,<item>,<position>,<item>,...
+export function tagTabExport(name, loadout) {
+  const layout = [];
+  for (const [slot, [row, column]] of Object.entries(TAG_TAB_EQUIPMENT_CELLS)) {
+    const itemId = loadout.equipment[slot * 2];
+    if (itemId) layout.push([row * BANK_ROW_LENGTH + column, itemId]);
+  }
+  for (let index = 0; index < INVENTORY_SIZE; ++index) {
+    const itemId = loadout.inventory[index * 2];
+    const row = Math.floor(index / 4);
+    const column = TAG_TAB_INVENTORY_COLUMN + (index % 4);
+    if (itemId) layout.push([row * BANK_ROW_LENGTH + column, itemId]);
+  }
+  if (layout.length === 0) return null;
+
+  // Tag names can't have RuneLite's markup characters, or commas since the export is comma separated
+  const tagName = name.replace(/[</>:,]/g, "").trim() || "gear";
+  const icon = loadout.equipment[WEAPON_SLOT * 2] || layout[0][1];
+  return ["banktags", 1, tagName, icon, "layout", ...layout.flat()].join(",");
+}
+
 let itemSlotsPromise;
 function loadItemSlots() {
   if (!itemSlotsPromise) {
     const getJson = (url) => fetch(url).then((response) => response.json());
     itemSlotsPromise = Promise.all([getJson("/data/item_slots.json"), getJson("/data/item_untradeable.json")]).then(
-      ([{ slots, twoHanded }, untradeable]) => ({ slots, twoHanded: new Set(twoHanded), untradeable: new Set(untradeable) })
+      ([{ slots, twoHanded }, untradeable]) => ({
+        slots,
+        twoHanded: new Set(twoHanded),
+        untradeable: new Set(untradeable),
+      })
     );
     itemSlotsPromise.catch(() => (itemSlotsPromise = undefined));
   }
@@ -57,6 +114,20 @@ function loadItemSlots() {
 
 function emptyLoadout() {
   return { equipment: new Array(EQUIPMENT_SIZE * 2).fill(0), inventory: new Array(INVENTORY_SIZE * 2).fill(0) };
+}
+
+function hasQuiver(loadout) {
+  return QUIVER_CAPES.has(loadout?.equipment[CAPE_SLOT * 2]);
+}
+
+// Loadouts saved before the quiver slot existed have one less equipment slot
+function normalizeSetup(setup) {
+  setup.member_order = setup.member_order || [];
+  setup.hidden_members = setup.hidden_members || [];
+  for (const loadout of Object.values(setup.members)) {
+    while (loadout.equipment.length < EQUIPMENT_SIZE * 2) loadout.equipment.push(0);
+  }
+  return setup;
 }
 
 function isEmptyLoadout(loadout) {
@@ -90,6 +161,7 @@ export class GearPage extends BaseElement {
     this.overviewEl = this.querySelector(".gear-page__overview");
     this.saveButton = this.querySelector('[data-action="save"]');
     this.discardButton = this.querySelector('[data-action="discard"]');
+    this.saveAsButton = this.querySelector('[data-action="save-as"]');
 
     // The route reuses this element, so unsaved edits survive leaving the page and coming back.
     // Start over only on first load or when a different group is logged in.
@@ -138,6 +210,7 @@ export class GearPage extends BaseElement {
     this.subscribe("members-updated", this.handleMembersUpdated.bind(this));
     this.subscribe("items-updated", () => this.renderLoadoutAndPicker());
     this.setStatus("");
+    this.openLinkedSetup();
     this.updateSaveState();
     this.renderAll();
   }
@@ -161,16 +234,89 @@ export class GearPage extends BaseElement {
     return [...groupData.members.keys()].filter((name) => name !== "@SHARED");
   }
 
+  // The members the current setup shows, in its order. Members it doesn't place yet (e.g. newly
+  // added) follow in the group's order.
+  get visibleMembers() {
+    const setup = this.currentSetup;
+    if (!setup) return this.memberNames;
+    const position = new Map(setup.member_order.map((name, i) => [name.toLowerCase(), i]));
+    const rank = (name) => position.get(name.toLowerCase()) ?? setup.member_order.length;
+    const hidden = new Set(setup.hidden_members.map((name) => name.toLowerCase()));
+    return this.memberNames.filter((name) => !hidden.has(name.toLowerCase())).sort((a, b) => rank(a) - rank(b));
+  }
+
+  get hiddenMembers() {
+    const visible = new Set(this.visibleMembers);
+    return this.memberNames.filter((name) => !visible.has(name));
+  }
+
   async loadSetups() {
     const result = await api.getLoadouts();
     if (!result.ok) throw new Error(result.data || result.status);
-    this.setups = result.data;
+    this.setups = result.data.map(normalizeSetup);
     if (!this.currentSetup) this.currentSetupId = this.setups[0]?.id ?? null;
   }
 
+  // A shared link names its setup, e.g. /group/gear?setup=12
+  openLinkedSetup() {
+    const linked = new URLSearchParams(window.location.search).get("setup");
+    if (linked === null) return;
+    const setupId = parseInt(linked);
+    if (this.setups.some((setup) => setup.id === setupId)) {
+      if (setupId !== this.currentSetupId) this.selection = null;
+      this.currentSetupId = setupId;
+    } else {
+      this.setStatus("The linked setup doesn't exist anymore", true);
+    }
+  }
+
+  // Keeps the address bar on the current setup, so it can be bookmarked or shared
+  syncUrl() {
+    if (!this.isConnected) return;
+    const url = new URL(window.location.href);
+    if (this.currentSetupId !== null) {
+      url.searchParams.set("setup", this.currentSetupId);
+    } else {
+      url.searchParams.delete("setup");
+    }
+    if (url.href !== window.location.href) window.history.replaceState(window.history.state, "", url);
+  }
+
+  async copyTagTab(member) {
+    const setup = this.currentSetup;
+    const loadout = this.loadoutFor(member);
+    const exported = setup && loadout && tagTabExport(`${setup.name} ${member}`, loadout);
+    if (!exported) {
+      this.setStatus(`${member} has nothing to export in this setup`, true);
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(exported);
+      this.setStatus(
+        `Copied ${member}'s tag tab. In the bank, right-click the add tab button and choose Import tag tab.`
+      );
+    } catch {
+      this.setStatus("Couldn't copy the tag tab to the clipboard", true);
+    }
+  }
+
+  async copySetupLink() {
+    const setup = this.currentSetup;
+    if (!setup) return;
+    const url = `${window.location.origin}/group/gear?setup=${setup.id}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      this.setStatus(
+        this.dirtySetupIds.has(setup.id) ? "Link copied, but save first so others see your changes" : "Link copied"
+      );
+    } catch {
+      this.setStatus(`Couldn't copy the link: ${url}`, true);
+    }
+  }
+
   handleMembersUpdated() {
-    if (!this.memberNames.includes(this.selectedMember)) {
-      this.selectedMember = this.memberNames[0] || null;
+    if (!this.visibleMembers.includes(this.selectedMember)) {
+      this.selectedMember = this.visibleMembers[0] || null;
       this.selection = null;
     }
     this.renderMembers();
@@ -267,7 +413,8 @@ export class GearPage extends BaseElement {
   availableQuantity(itemId, used, location = this.selectedLocation) {
     if (!location && this.isOwnerOnly(itemId)) {
       return this.owners(itemId).reduce(
-        (total, member) => total + Math.max(0, this.ownedQuantity(itemId, member) - this.memberUsedQuantity(itemId, member)),
+        (total, member) =>
+          total + Math.max(0, this.ownedQuantity(itemId, member) - this.memberUsedQuantity(itemId, member)),
         0
       );
     }
@@ -289,11 +436,18 @@ export class GearPage extends BaseElement {
 
   // A location is a selection ({ kind, slot } or { kind, index }), optionally with a member
   allowsQuantity(location) {
-    return location.kind === "inventory" || [WEAPON_SLOT, AMMO_SLOT].includes(location.slot);
+    return location.kind === "inventory" || [WEAPON_SLOT, AMMO_SLOT, QUIVER_SLOT].includes(location.slot);
   }
 
+  // The quiver slot takes ammo, and only exists while its member wears a quiver
   fitsLocation(itemId, location) {
-    return location.kind === "inventory" || this.itemSlots.slots[itemId] === location.slot;
+    if (location.kind === "inventory") return true;
+    if (location.slot === QUIVER_SLOT) {
+      return (
+        this.itemSlots.slots[itemId] === AMMO_SLOT && hasQuiver(this.loadoutFor(location.member ?? this.selectedMember))
+      );
+    }
+    return this.itemSlots.slots[itemId] === location.slot;
   }
 
   selectionAllowsQuantity() {
@@ -301,7 +455,7 @@ export class GearPage extends BaseElement {
   }
 
   fitsSelection(itemId) {
-    return this.fitsLocation(itemId, this.selection);
+    return this.fitsLocation(itemId, this.selectedLocation);
   }
 
   // Moves the item at one member's slot to another slot, possibly another member's. Dropping
@@ -354,6 +508,16 @@ export class GearPage extends BaseElement {
     if (dryRun) return true;
 
     apply();
+    // A quiver's ammo is inside it, so it goes along when the quiver moves to another member
+    if (from.kind === "equipment" && to.kind === "equipment" && to.slot === CAPE_SLOT && fromLoadout !== toLoadout) {
+      const quiverIndex = QUIVER_SLOT * 2;
+      for (const i of [quiverIndex, quiverIndex + 1]) {
+        [fromLoadout.equipment[i], toLoadout.equipment[i]] = [
+          toLoadout.equipment[i] || 0,
+          fromLoadout.equipment[i] || 0,
+        ];
+      }
+    }
     if (to.kind === "equipment") this.resolveTwoHanded(toLoadout, to.slot, itemId, from, fromArray, fromIndex);
     if (from.kind === "equipment" && fromArray[fromIndex]) {
       this.applyTwoHandedRule(fromLoadout, from.slot, fromArray[fromIndex]);
@@ -459,9 +623,19 @@ export class GearPage extends BaseElement {
   }
 
   changed() {
+    this.applyQuiverRule();
     this.markDirty(this.currentSetup);
     this.renderMembers();
     this.renderLoadoutAndPicker();
+  }
+
+  // Taking off a quiver takes its ammo with it, so a loadout without one has an empty quiver slot
+  applyQuiverRule() {
+    for (const [member, loadout] of Object.entries(this.currentSetup?.members || {})) {
+      if (hasQuiver(loadout) || !loadout.equipment[QUIVER_SLOT * 2]) continue;
+      this.setSlot(loadout, { kind: "equipment", slot: QUIVER_SLOT }, 0, 0);
+      if (member === this.selectedMember && this.selection?.slot === QUIVER_SLOT) this.selection = null;
+    }
   }
 
   // ---- Saving ----
@@ -474,11 +648,36 @@ export class GearPage extends BaseElement {
 
   updateSaveState() {
     const dirty = this.dirtySetupIds.size;
-    if (this.saveButton) this.saveButton.disabled = dirty === 0 || this.saving;
-    if (this.discardButton) this.discardButton.disabled = dirty === 0 || this.saving;
+    this.updateSaveButtons();
     if (dirty > 0 && !this.saving) {
       this.setStatus(dirty === 1 ? "Unsaved changes" : `Unsaved changes in ${dirty} setups`);
     }
+  }
+
+  // The loadouts worth saving: current members' non-empty ones
+  savableMembers(setup) {
+    const memberNames = new Set(this.memberNames);
+    const members = {};
+    for (const [name, loadout] of Object.entries(setup.members)) {
+      if (memberNames.has(name) && !isEmptyLoadout(loadout)) members[name] = loadout;
+    }
+    return members;
+  }
+
+  updateSaveButtons() {
+    const dirty = this.dirtySetupIds.size;
+    if (this.saveButton) this.saveButton.disabled = dirty === 0 || this.saving;
+    if (this.discardButton) this.discardButton.disabled = dirty === 0 || this.saving;
+    if (this.saveAsButton) this.saveAsButton.disabled = !this.dirtySetupIds.has(this.currentSetupId) || this.copying;
+  }
+
+  // The member layout, without members who have since left the group
+  savableLayout(setup) {
+    const memberNames = new Set(this.memberNames);
+    return {
+      member_order: setup.member_order.filter((name) => memberNames.has(name)),
+      hidden_members: setup.hidden_members.filter((name) => memberNames.has(name)),
+    };
   }
 
   // Saves every setup with unsaved changes
@@ -502,14 +701,16 @@ export class GearPage extends BaseElement {
           break;
         }
 
-        const memberNames = new Set(this.memberNames);
-        const members = {};
-        for (const [name, loadout] of Object.entries(setup.members)) {
-          if (memberNames.has(name) && !isEmptyLoadout(loadout)) members[name] = loadout;
-        }
+        const members = this.savableMembers(setup);
 
         this.setStatus("Saving...");
-        const result = await api.updateLoadoutSetup({ id: setup.id, name: setup.name, version: setup.version, members });
+        const result = await api.updateLoadoutSetup({
+          ...this.savableLayout(setup),
+          id: setup.id,
+          name: setup.name,
+          version: setup.version,
+          members,
+        });
         if (result.ok) {
           setup.version = result.data.version;
           if (this.dirtySetupIds.size === 0 && !conflictMessage) this.setStatus("Saved");
@@ -569,7 +770,7 @@ export class GearPage extends BaseElement {
     const latest = result.data.find((x) => x.id === setupId);
     const name = this.setups.find((x) => x.id === setupId)?.name || "A setup";
     this.setups = latest
-      ? this.setups.map((x) => (x.id === setupId ? latest : x))
+      ? this.setups.map((x) => (x.id === setupId ? normalizeSetup(latest) : x))
       : this.setups.filter((x) => x.id !== setupId);
     if (!this.currentSetup) this.currentSetupId = this.setups[0]?.id ?? null;
     const message = latest
@@ -586,6 +787,10 @@ export class GearPage extends BaseElement {
 
   handleClick(event) {
     this.closeContextMenu();
+    // Clicking outside the member boxes goes back to searching all items, like Overview does
+    const keepsSelection =
+      ".gear-page__overview-card, .gear-page__loadout, .gear-page__picker, .gear-page__head, .gear-page__context-menu";
+    if (this.selection && !event.target.closest(keepsSelection)) this.clearSelection();
     const target = event.target.closest("[data-action]");
     if (!target || !this.contains(target)) return;
     const action = target.getAttribute("data-action");
@@ -594,11 +799,25 @@ export class GearPage extends BaseElement {
       this.saveDirtySetups();
     } else if (action === "discard") {
       this.discardChanges();
+    } else if (action === "save-as") {
+      this.copySetup(false);
+    } else if (action === "duplicate-setup") {
+      this.copySetup(true);
     } else if (action === "new-setup") {
       this.createSetup();
     } else if (action === "delete-setup") {
       this.deleteSetup();
-    } else if (action === "select-member" || action === "edit-member") {
+    } else if (action === "copy-link") {
+      this.copySetupLink();
+    } else if (action === "export-tag-tab") {
+      this.copyTagTab(target.getAttribute("data-member"));
+    } else if (action === "hide-member") {
+      this.hideMember(target.getAttribute("data-member"));
+    } else if (action === "show-member") {
+      this.showMember(target.getAttribute("data-member"));
+    } else if (action === "move-member") {
+      this.moveMember(target.getAttribute("data-member"), parseInt(target.getAttribute("data-move")));
+    } else if (action === "select-member") {
       this.view = "edit";
       this.selectedMember = target.getAttribute("data-member");
       this.selection = null;
@@ -624,6 +843,53 @@ export class GearPage extends BaseElement {
       this.renderMembers();
       this.renderLoadoutAndPicker();
     }
+  }
+
+  // ---- Member layout ----
+
+  // Hiding a member clears their loadout, so nothing hidden counts toward the group's items
+  hideMember(member) {
+    const setup = this.currentSetup;
+    if (!setup || !this.visibleMembers.includes(member)) return;
+    const hide = () => {
+      delete setup.members[member];
+      setup.hidden_members.push(member);
+      if (this.selectedMember === member) {
+        this.selectedMember = this.visibleMembers[0] || null;
+        this.selection = null;
+      }
+      this.changed();
+    };
+    const loadout = setup.members[member];
+    if (!loadout || isEmptyLoadout(loadout)) {
+      hide();
+      return;
+    }
+    confirmDialogManager.confirm({
+      headline: `Hide ${member}?`,
+      body: `${member}'s loadout in ${setup.name} will be cleared.`,
+      yesCallback: hide,
+      noCallback: () => {},
+    });
+  }
+
+  showMember(member) {
+    const setup = this.currentSetup;
+    if (!setup) return;
+    setup.hidden_members = setup.hidden_members.filter((name) => name.toLowerCase() !== member.toLowerCase());
+    this.changed();
+  }
+
+  // Moves a member one place left (-1) or right (1) among the shown members
+  moveMember(member, direction) {
+    const setup = this.currentSetup;
+    const order = this.visibleMembers;
+    const from = order.indexOf(member);
+    const to = from + direction;
+    if (!setup || from < 0 || to < 0 || to >= order.length) return;
+    [order[from], order[to]] = [order[to], order[from]];
+    setup.member_order = order;
+    this.changed();
   }
 
   // Right-clicking a filled slot opens a menu like the game's, with Remove and any transforms
@@ -775,12 +1041,76 @@ export class GearPage extends BaseElement {
       this.setStatus(`Failed to create setup: ${result.data || result.status}`, true);
       return;
     }
-    this.setups.push(result.data);
+    this.setups.push(normalizeSetup(result.data));
     this.currentSetupId = result.data.id;
     this.selection = null;
     this.renderAll();
     this.setupNameInput.focus();
     this.setupNameInput.select();
+  }
+
+  // Copies the current setup, unsaved edits included, into a new saved setup and opens it.
+  // Duplicate keeps the original's unsaved edits; Save as puts it back to its last saved version.
+  async copySetup(keepOriginal) {
+    const original = this.currentSetup;
+    if (!original || this.copying) return;
+    this.copying = true;
+    this.updateSaveButtons();
+    try {
+      const suffix = " (copy)";
+      const name = `${(original.name.trim() || "Setup").slice(0, MAX_SETUP_NAME_LENGTH - suffix.length)}${suffix}`;
+      const created = await api.createLoadoutSetup(name);
+      if (!created.ok) {
+        this.setStatus(`Failed to create setup: ${created.data || created.status}`, true);
+        return;
+      }
+      const members = JSON.parse(JSON.stringify(this.savableMembers(original)));
+      const layout = JSON.parse(JSON.stringify(this.savableLayout(original)));
+      const saved = await api.updateLoadoutSetup({
+        ...layout,
+        id: created.data.id,
+        name,
+        version: created.data.version,
+        members,
+      });
+      const copy = normalizeSetup({
+        ...created.data,
+        ...layout,
+        version: saved.ok ? saved.data.version : created.data.version,
+        members,
+      });
+      if (!keepOriginal) await this.revertSetup(original.id);
+
+      this.setups.push(copy);
+      this.currentSetupId = copy.id;
+      this.selection = null;
+      if (!saved.ok) this.dirtySetupIds.add(copy.id);
+      this.renderAll();
+      this.updateSaveState();
+      if (saved.ok) {
+        this.setStatus(keepOriginal ? `Duplicated ${original.name}` : `Saved as ${name}`);
+      } else {
+        this.setStatus(`Created ${name} but failed to save its loadouts: ${saved.data || saved.status}`, true);
+      }
+      this.setupNameInput.focus();
+      this.setupNameInput.select();
+    } catch (error) {
+      this.setStatus(`Failed to copy setup: ${error}`, true);
+    } finally {
+      this.copying = false;
+      this.updateSaveButtons();
+    }
+  }
+
+  // Drops a setup's unsaved edits by loading its saved version
+  async revertSetup(setupId) {
+    this.dirtySetupIds.delete(setupId);
+    const result = await api.getLoadouts();
+    if (!result.ok) throw new Error(result.data || result.status);
+    const latest = result.data.find((x) => x.id === setupId);
+    this.setups = latest
+      ? this.setups.map((x) => (x.id === setupId ? normalizeSetup(latest) : x))
+      : this.setups.filter((x) => x.id !== setupId);
   }
 
   deleteSetup() {
@@ -816,7 +1146,7 @@ export class GearPage extends BaseElement {
   // ---- Rendering ----
 
   renderAll() {
-    if (!this.memberNames.includes(this.selectedMember)) this.selectedMember = this.memberNames[0] || null;
+    if (!this.visibleMembers.includes(this.selectedMember)) this.selectedMember = this.visibleMembers[0] || null;
     this.renderSetups();
     this.renderMembers();
     this.renderLoadoutAndPicker();
@@ -842,15 +1172,30 @@ export class GearPage extends BaseElement {
       this.overviewEl.innerHTML = `<p>No gear setups yet. Create one with <b>New setup</b>.</p>`;
       return;
     }
-    this.overviewEl.innerHTML = this.memberNames
-      .map((name) => {
+    const visibleMembers = this.visibleMembers;
+    if (visibleMembers.length === 0) {
+      this.overviewEl.innerHTML = `<p>Every member is hidden in this setup. Show them again from the buttons above.</p>`;
+      return;
+    }
+    this.overviewEl.innerHTML = visibleMembers
+      .map((name, i) => {
         const loadout = setup.members[name] || emptyLoadout();
         const escapedName = utility.escapeHtml(name);
         const editing = name === this.selectedMember && this.selection ? "gear-page__overview-card--editing" : "";
         return `<div class="gear-page__overview-card ${editing} rsborder rsbackground">
           <div class="gear-page__overview-head">
             <h3>${escapedName}</h3>
-            <button class="men-button small" type="button" data-action="edit-member" data-member="${escapedName}">Edit</button>
+            <div class="gear-page__overview-actions">
+              <button class="men-button small" type="button" data-action="move-member" data-move="-1"
+                data-member="${escapedName}" title="Move left" ${i === 0 ? "disabled" : ""}>&lt;</button>
+              <button class="men-button small" type="button" data-action="move-member" data-move="1"
+                data-member="${escapedName}" title="Move right" ${
+          i === visibleMembers.length - 1 ? "disabled" : ""
+        }>&gt;</button>
+              <button class="men-button small" type="button" data-action="export-tag-tab" data-member="${escapedName}"
+                title="Copy as a RuneLite bank tag tab" ${isEmptyLoadout(loadout) ? "disabled" : ""}>Tag tab</button>
+              <button class="men-button small" type="button" data-action="hide-member" data-member="${escapedName}">Hide</button>
+            </div>
           </div>
           <div class="equipment">${this.equipmentHtml(loadout, used, name)}</div>
           <div class="gear-page__inventory">
@@ -878,7 +1223,11 @@ export class GearPage extends BaseElement {
     this.setupNameInput.value = setup?.name || "";
     this.setupNameInput.disabled = !setup;
     this.querySelector('[data-action="delete-setup"]').disabled = !setup;
+    this.querySelector('[data-action="copy-link"]').disabled = !setup;
+    this.querySelector('[data-action="duplicate-setup"]').disabled = !setup;
+    this.updateSaveButtons();
     this.classList.toggle("gear-page--empty", !setup);
+    this.syncUrl();
   }
 
   // Overview comes first, then a button per member that opens their loadout on its own
@@ -887,23 +1236,35 @@ export class GearPage extends BaseElement {
     const overview = this.view === "overview";
     const overviewButton = `<button class="men-button small ${overview ? "active" : ""}" type="button"
       data-action="view-overview">Overview</button>`;
+    const hiddenButtons = this.hiddenMembers
+      .map((name) => {
+        const escapedName = utility.escapeHtml(name);
+        return `<button class="men-button small gear-page__hidden-member" type="button" data-action="show-member"
+          data-member="${escapedName}" title="Show ${escapedName} in this setup">+ ${escapedName}</button>`;
+      })
+      .join("");
     this.membersEl.innerHTML =
       overviewButton +
-      this.memberNames
+      this.visibleMembers
         .map((name) => {
           const hasLoadout = setup?.members[name] && !isEmptyLoadout(setup.members[name]);
-          return `<button class="men-button small ${!overview && name === this.selectedMember ? "active" : ""}" type="button"
+          return `<button class="men-button small ${
+            !overview && name === this.selectedMember ? "active" : ""
+          }" type="button"
           data-action="select-member" data-member="${utility.escapeHtml(name)}">${utility.escapeHtml(name)}${
             hasLoadout ? " *" : ""
           }</button>`;
         })
-        .join("");
+        .join("") +
+      hiddenButtons;
   }
 
   slotHtml(itemId, quantity, used, member) {
     if (!itemId) return "";
     const over = this.usedQuantity(itemId, used, member) > this.ownedQuantity(itemId, member);
-    return `<item-box item-id="${itemId}" item-quantity="${quantity}" class="${over ? "gear-page__over" : ""}"></item-box>`;
+    return `<item-box item-id="${itemId}" item-quantity="${quantity}" class="${
+      over ? "gear-page__over" : ""
+    }"></item-box>`;
   }
 
   renderLoadout(used) {
@@ -918,15 +1279,22 @@ export class GearPage extends BaseElement {
   equipmentHtml(loadout, used, memberName) {
     const isSelectedMember = memberName === this.selectedMember;
     const member = utility.escapeHtml(memberName || "");
-    return EQUIPMENT_SLOTS.map(({ slot, name, className, emptyImage }) => {
-      const itemId = loadout.equipment[slot * 2];
-      const selected = isSelectedMember && this.selection?.kind === "equipment" && this.selection.slot === slot;
-      return `<div class="equipment-slot ${className} gear-page__slot ${selected ? "selected" : ""}" title="${name}"
+    const slots = hasQuiver(loadout) ? EQUIPMENT_SLOTS : EQUIPMENT_SLOTS.filter(({ slot }) => slot !== QUIVER_SLOT);
+    return slots
+      .map(({ slot, name, className, emptyImage }) => {
+        const itemId = loadout.equipment[slot * 2];
+        const selected = isSelectedMember && this.selection?.kind === "equipment" && this.selection.slot === slot;
+        return `<div class="equipment-slot ${className} gear-page__slot ${selected ? "selected" : ""}" title="${name}"
         draggable="${itemId ? "true" : "false"}"
         data-action="select-slot" data-member="${member}" data-kind="equipment" data-slot="${slot}">
-        ${itemId ? this.slotHtml(itemId, loadout.equipment[slot * 2 + 1], used, memberName) : `<img src="/ui/${emptyImage}" draggable="false" />`}
+        ${
+          itemId
+            ? this.slotHtml(itemId, loadout.equipment[slot * 2 + 1], used, memberName)
+            : `<img src="/ui/${emptyImage}" draggable="false" />`
+        }
       </div>`;
-    }).join("");
+      })
+      .join("");
   }
 
   inventoryHtml(loadout, used, memberName) {
@@ -965,7 +1333,9 @@ export class GearPage extends BaseElement {
         <p>
           ${
             slotItemId
-              ? `${utility.escapeHtml(Item.itemName(slotItemId))}${slotQuantity > 1 ? ` x ${slotQuantity.toLocaleString()}` : ""}
+              ? `${utility.escapeHtml(Item.itemName(slotItemId))}${
+                  slotQuantity > 1 ? ` x ${slotQuantity.toLocaleString()}` : ""
+                }
                  <button class="men-button small" type="button" data-action="remove">Remove</button>`
               : ""
           }
@@ -995,7 +1365,9 @@ export class GearPage extends BaseElement {
 
     if (candidates.length === 0) {
       this.pickerListEl.innerHTML = focused
-        ? `<p class="gear-page__empty">No available group items fit this slot${search ? " and match the search" : ""}.</p>`
+        ? `<p class="gear-page__empty">No available group items fit this slot${
+            search ? " and match the search" : ""
+          }.</p>`
         : `<p class="gear-page__empty">No available group items${search ? " match the search" : ""}.</p>`;
       return;
     }
@@ -1003,24 +1375,24 @@ export class GearPage extends BaseElement {
     this.pickerListEl.innerHTML =
       candidates
         .slice(0, MAX_PICKER_RESULTS)
-        .map(
-          ({ item, available }) => {
-            // In the unfocused list, say where wearable items go
-            const slot = focused ? null : EQUIPMENT_SLOTS.find((x) => x.slot === this.itemSlots.slots[item.id]);
-            return `<button class="gear-page__pick rsbackground-hover" type="button" draggable="true"
+        .map(({ item, available }) => {
+          // In the unfocused list, say where wearable items go
+          const slot = focused ? null : EQUIPMENT_SLOTS.find((x) => x.slot === this.itemSlots.slots[item.id]);
+          return `<button class="gear-page__pick rsbackground-hover" type="button" draggable="true"
               data-action="pick" data-item-id="${item.id}" ${focused ? "" : `title="Drag onto a slot"`}>
               <img src="${Item.imageUrl(item.id, 1)}" loading="lazy" draggable="false" />
               <span class="gear-page__pick-name">${utility.escapeHtml(item.name)}</span>
               ${slot ? `<span class="gear-page__pick-slot">${slot.name}</span>` : ""}
               ${
                 !focused && this.isOwnerOnly(item.id)
-                  ? `<span class="gear-page__pick-slot" title="Untradeable, only its owner can use it">${utility.escapeHtml(this.owners(item.id).join(", "))} only</span>`
+                  ? `<span class="gear-page__pick-slot" title="Untradeable, only its owner can use it">${utility.escapeHtml(
+                      this.owners(item.id).join(", ")
+                    )} only</span>`
                   : ""
               }
               <span class="gear-page__pick-available">${available.toLocaleString()} available</span>
             </button>`;
-          }
-        )
+        })
         .join("") +
       (candidates.length > MAX_PICKER_RESULTS
         ? `<p class="gear-page__empty">${candidates.length - MAX_PICKER_RESULTS} more, search to narrow down</p>`
@@ -1038,7 +1410,11 @@ export class GearPage extends BaseElement {
           const owned = this.ownedQuantity(itemId, member);
           if (quantity > owned) {
             warnings.push(
-              `${utility.escapeHtml(Item.itemName(itemId))} (untradeable): ${utility.escapeHtml(member)}'s loadout uses ${quantity.toLocaleString()}, ${utility.escapeHtml(member)} has ${owned.toLocaleString()}`
+              `${utility.escapeHtml(Item.itemName(itemId))} (untradeable): ${utility.escapeHtml(
+                member
+              )}'s loadout uses ${quantity.toLocaleString()}, ${utility.escapeHtml(
+                member
+              )} has ${owned.toLocaleString()}`
             );
           }
         }

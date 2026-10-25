@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { GearPage } from "../src/gear-page/gear-page";
+import { GearPage, tagTabExport } from "../src/gear-page/gear-page";
 import { groupData } from "../src/data/group-data";
 import { api } from "../src/data/api";
 import { Item } from "../src/data/item";
@@ -42,7 +42,7 @@ function makePage({ owned, members = {} }) {
     twoHanded: new Set([GODSWORD, SCORCHING_BOW]),
     untradeable: new Set(),
   };
-  page.setups = [{ id: 1, name: "ToB", version: 1, members }];
+  page.setups = [{ id: 1, name: "ToB", version: 1, members, member_order: [], hidden_members: [] }];
   page.currentSetupId = 1;
   page.selectedMember = "Alice";
   page.dirtySetupIds = new Set();
@@ -317,6 +317,159 @@ describe("gear page", () => {
     });
   });
 
+  describe("quiver slot", () => {
+    const QUIVER = 28951;
+    const FIRE_CAPE = 6570;
+    const at = (member, kind, n) => (kind === "equipment" ? { member, kind, slot: n } : { member, kind, index: n });
+    const quiverPage = (members) => {
+      const page = makePage({ owned: { [ARROW]: 500 }, members });
+      Object.assign(page.itemSlots.slots, { [QUIVER]: 1, [FIRE_CAPE]: 1 });
+      return page;
+    };
+
+    it("takes ammo only while a quiver is worn", () => {
+      const page = quiverPage({
+        Alice: loadoutWith({ equipment: { 1: [QUIVER, 1] } }),
+        Bob: loadoutWith({ equipment: { 1: [FIRE_CAPE, 1] } }),
+      });
+      expect(page.fitsLocation(ARROW, at("Alice", "equipment", 14))).toBe(true);
+      expect(page.fitsLocation(WHIP, at("Alice", "equipment", 14))).toBe(false);
+      expect(page.fitsLocation(ARROW, at("Bob", "equipment", 14))).toBe(false);
+
+      page.selection = { kind: "equipment", slot: 14 };
+      page.quantityInput.value = "200";
+      page.placeItem(ARROW);
+      expect(page.loadoutFor("Alice").equipment.slice(28, 30)).toEqual([ARROW, 200]);
+    });
+
+    it("empties the quiver slot when the quiver comes off", () => {
+      const page = quiverPage({ Alice: loadoutWith({ equipment: { 1: [QUIVER, 1], 14: [ARROW, 100] } }) });
+      page.selection = { kind: "equipment", slot: 1 };
+      page.clearSlot(page.selection);
+      expect(page.loadoutFor("Alice").equipment.slice(28, 30)).toEqual([0, 0]);
+    });
+
+    it("moves the quiver's ammo with it to another member", () => {
+      const page = quiverPage({
+        Alice: loadoutWith({ equipment: { 1: [QUIVER, 1], 14: [ARROW, 100] } }),
+        Bob: loadoutWith({ equipment: { 1: [FIRE_CAPE, 1] } }),
+      });
+      expect(page.moveItem(at("Alice", "equipment", 1), at("Bob", "equipment", 1))).toBe(true);
+      page.changed();
+      expect(page.loadoutFor("Bob").equipment.slice(2, 4)).toEqual([QUIVER, 1]);
+      expect(page.loadoutFor("Bob").equipment.slice(28, 30)).toEqual([ARROW, 100]);
+      expect(page.loadoutFor("Alice").equipment.slice(2, 4)).toEqual([FIRE_CAPE, 1]);
+      expect(page.loadoutFor("Alice").equipment.slice(28, 30)).toEqual([0, 0]);
+    });
+  });
+
+  describe("setup links", () => {
+    it("opens the setup named in the link", () => {
+      const page = makePage({ owned: {} });
+      page.setups.push({ id: 7, name: "CoX", version: 1, members: {}, member_order: [], hidden_members: [] });
+      window.history.replaceState(null, "", "/group/gear?setup=7");
+      page.openLinkedSetup();
+      expect(page.currentSetupId).toBe(7);
+    });
+
+    it("keeps the current setup when the linked one is gone", () => {
+      const page = makePage({ owned: {} });
+      window.history.replaceState(null, "", "/group/gear?setup=99");
+      page.openLinkedSetup();
+      expect(page.currentSetupId).toBe(1);
+      expect(page.setStatus).toHaveBeenLastCalledWith(expect.stringContaining("doesn't exist"), true);
+    });
+  });
+
+  describe("member layout", () => {
+    it("reorders members for the setup", () => {
+      const page = makePage({ owned: {} });
+      expect(page.visibleMembers).toEqual(["Alice", "Bob"]);
+      page.moveMember("Bob", -1);
+      expect(page.visibleMembers).toEqual(["Bob", "Alice"]);
+      expect(page.savableLayout(page.currentSetup).member_order).toEqual(["Bob", "Alice"]);
+    });
+
+    it("hides and shows a member without a loadout", () => {
+      const page = makePage({ owned: {} });
+      page.hideMember("Alice");
+      expect(page.visibleMembers).toEqual(["Bob"]);
+      expect(page.hiddenMembers).toEqual(["Alice"]);
+      expect(page.selectedMember).toBe("Bob");
+      page.showMember("Alice");
+      expect(page.visibleMembers).toEqual(["Alice", "Bob"]);
+    });
+
+    it("asks before hiding a member with a loadout, then clears it", async () => {
+      const { confirmDialogManager } = await import("../src/confirm-dialog/confirm-dialog-manager");
+      const confirm = vi.spyOn(confirmDialogManager, "confirm").mockImplementation(({ yesCallback }) => yesCallback());
+      const page = makePage({ owned: {}, members: { Bob: loadoutWith({ equipment: { 3: [WHIP, 1] } }) } });
+      page.hideMember("Bob");
+      expect(confirm).toHaveBeenCalled();
+      expect(page.currentSetup.members.Bob).toBeUndefined();
+      expect(page.visibleMembers).toEqual(["Alice"]);
+      confirm.mockRestore();
+    });
+  });
+
+  describe("copying setups", () => {
+    const copyPage = () => {
+      const page = makePage({ owned: {}, members: { Alice: loadoutWith({ equipment: { 3: [WHIP, 1] } }) } });
+      page.currentSetup.hidden_members = ["Bob"];
+      page.renderAll = vi.fn();
+      page.setupNameInput = { focus: vi.fn(), select: vi.fn() };
+      vi.spyOn(api, "createLoadoutSetup").mockResolvedValue({
+        ok: true,
+        status: 200,
+        data: { id: 2, name: "ToB (copy)", version: 1, members: {}, member_order: [], hidden_members: [] },
+      });
+      vi.spyOn(api, "updateLoadoutSetup").mockResolvedValue({ ok: true, status: 200, data: { version: 2 } });
+      return page;
+    };
+
+    it("duplicates a setup with its unsaved edits, keeping the original's edits", async () => {
+      const page = copyPage();
+      page.dirtySetupIds.add(1);
+      await page.copySetup(true);
+
+      const copy = page.setups.find((x) => x.id === 2);
+      expect(copy.name).toBe("ToB (copy)");
+      expect(copy.members.Alice.equipment[6]).toBe(WHIP);
+      expect(copy.hidden_members).toEqual(["Bob"]);
+      expect(copy.members.Alice).not.toBe(page.setups[0].members.Alice);
+      expect(page.currentSetupId).toBe(2);
+      expect(page.dirtySetupIds.has(1)).toBe(true);
+    });
+
+    it("saves edits as a new setup and puts the original back to its saved version", async () => {
+      const page = copyPage();
+      page.dirtySetupIds.add(1);
+      const savedToB = { id: 1, name: "ToB", version: 1, members: {} };
+      vi.spyOn(api, "getLoadouts").mockResolvedValue({ ok: true, status: 200, data: [savedToB] });
+      await page.copySetup(false);
+
+      expect(page.setups.find((x) => x.id === 2).members.Alice.equipment[6]).toBe(WHIP);
+      expect(page.setups.find((x) => x.id === 1)).toBe(savedToB);
+      expect(page.dirtySetupIds.size).toBe(0);
+    });
+  });
+
+  describe("tag tab export", () => {
+    it("lays out equipment like the equipment screen and the inventory 4 wide beside it", () => {
+      const loadout = loadoutWith({
+        equipment: { 0: [10828, 1], 3: [WHIP, 1], 13: [ARROW, 100] },
+        inventory: { 0: [SHARK, 1], 5: [SHARK, 1] },
+      });
+      expect(tagTabExport("ToB: Alice, mage", loadout)).toBe(
+        `banktags,1,ToB Alice mage,${WHIP},layout,1,10828,16,${WHIP},10,${ARROW},4,${SHARK},13,${SHARK}`
+      );
+    });
+
+    it("exports nothing for an empty loadout", () => {
+      expect(tagTabExport("ToB", loadoutWith())).toBeNull();
+    });
+  });
+
   describe("untradeable items", () => {
     const FIRE_CAPE = 6570;
     const at = (member, kind, n) => (kind === "equipment" ? { member, kind, slot: n } : { member, kind, index: n });
@@ -393,8 +546,8 @@ describe("gear page", () => {
     page.renderAll = vi.fn();
     Object.defineProperty(page, "isConnected", { value: true });
     page.setups = [
-      { id: 1, name: "ToB", version: 1, members: { Alice: loadoutWith({ equipment: { 3: [WHIP, 1] } }) } },
-      { id: 2, name: "CoX", version: 5, members: { Alice: loadoutWith({ equipment: { 3: [GODSWORD, 1] } }) } },
+      { id: 1, name: "ToB", version: 1, members: { Alice: loadoutWith({ equipment: { 3: [WHIP, 1] } }) }, member_order: [], hidden_members: [] },
+      { id: 2, name: "CoX", version: 5, members: { Alice: loadoutWith({ equipment: { 3: [GODSWORD, 1] } }) }, member_order: [], hidden_members: [] },
     ];
     const serverToB = { id: 1, name: "ToB (theirs)", version: 3, members: {} };
     vi.spyOn(api, "getLoadouts").mockResolvedValue({ ok: true, status: 200, data: [serverToB, { id: 2, name: "CoX", version: 5, members: {} }] });

@@ -13,6 +13,11 @@ const USER_AGENT = "group-ironmen untradeable item list (github.com/bheisenberg/
 // Wiki categories of pages whose untradeable versions are just charged forms of a tradeable one.
 // The Sailing blowpipes aren't tagged as items with charges, so their category is listed too.
 const CHARGED_CATEGORIES = ["Items with charges", "Blowpipes"];
+// Untradeable items the wiki has no tradeable version of, but that revert into a tradeable item
+const REVERTIBLE_ITEMS = [
+  28687 /* Blazing blowpipe (empty), a Toxic blowpipe with an ornament kit */,
+  28688 /* Blazing blowpipe */,
+];
 
 async function wikiApi(params) {
   const url = `https://oldschool.runescape.wiki/api.php?format=json&${new URLSearchParams(params)}`;
@@ -62,7 +67,7 @@ async function main() {
     for (const id of ids) {
       if (!itemData[id]) continue;
       if ("tradeable" in row) tradeable.add(parseInt(id));
-      else if (chargedForm) chargedCount++;
+      else if (chargedForm || REVERTIBLE_ITEMS.includes(parseInt(id))) chargedCount++;
       else untradeable.add(parseInt(id));
     }
   }
@@ -70,7 +75,7 @@ async function main() {
   const ids = [...untradeable].filter((id) => !tradeable.has(id)).sort((a, b) => a - b);
   fs.writeFileSync("public/data/item_untradeable.json", JSON.stringify(ids));
   console.log(
-    `Wrote ${ids.length} untradeable items (${tradeable.size} tradeable, ${chargedCount} untradeable only while charged)`
+    `Wrote ${ids.length} untradeable items (${tradeable.size} tradeable, ${chargedCount} untradeable only while charged or ornamented)`
   );
 }
 

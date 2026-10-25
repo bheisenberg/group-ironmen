@@ -967,6 +967,21 @@ CREATE TABLE IF NOT EXISTS groupironman.loadouts (
         transaction.commit().await?;
     }
 
+    if !has_migration_run(client, "add_loadout_member_layout").await? {
+        let transaction = client.transaction().await?;
+        transaction
+            .batch_execute(
+                r#"
+ALTER TABLE groupironman.loadout_setups
+    ADD COLUMN IF NOT EXISTS member_order BIGINT[] NOT NULL DEFAULT '{}',
+    ADD COLUMN IF NOT EXISTS hidden_member_ids BIGINT[] NOT NULL DEFAULT '{}';
+"#,
+            )
+            .await?;
+        commit_migration(&transaction, "add_loadout_member_layout").await?;
+        transaction.commit().await?;
+    }
+
     Ok(())
 }
 
@@ -978,10 +993,26 @@ pub async fn get_loadout_setups(
 ) -> Result<Vec<LoadoutSetup>, ApiError> {
     let setup_rows = client
         .query(
-            "SELECT setup_id, name, version FROM groupironman.loadout_setups WHERE group_id=$1 ORDER BY setup_id",
+            "SELECT setup_id, name, version, member_order, hidden_member_ids FROM groupironman.loadout_setups WHERE group_id=$1 ORDER BY setup_id",
             &[&group_id],
         )
         .await?;
+    // A setup's member layout is stored by member_id so renames keep it; deleted members drop out
+    let member_rows = client
+        .query(
+            "SELECT member_id, member_name::TEXT AS member_name FROM groupironman.members WHERE group_id=$1",
+            &[&group_id],
+        )
+        .await?;
+    let mut member_names: HashMap<i64, String> = HashMap::new();
+    for row in member_rows {
+        member_names.insert(row.try_get("member_id")?, row.try_get("member_name")?);
+    }
+    let names_of = |ids: Vec<i64>| -> Vec<String> {
+        ids.iter()
+            .filter_map(|id| member_names.get(id).cloned())
+            .collect()
+    };
     let loadout_rows = client
         .query(
             r#"
@@ -1003,6 +1034,8 @@ WHERE s.group_id=$1
                 name: row.try_get("name")?,
                 version: row.try_get("version")?,
                 members: HashMap::new(),
+                member_order: names_of(row.try_get("member_order")?),
+                hidden_members: names_of(row.try_get("hidden_member_ids")?),
             })
         })
         .collect::<Result<_, tokio_postgres::Error>>()?;
@@ -1055,6 +1088,8 @@ RETURNING setup_id, version
         name: name.to_owned(),
         version: row.try_get("version")?,
         members: HashMap::new(),
+        member_order: Vec::new(),
+        hidden_members: Vec::new(),
     })
 }
 
@@ -1094,10 +1129,26 @@ pub async fn update_loadout_setup(
         member_ids.insert(name.to_lowercase(), row.try_get("member_id")?);
     }
 
+    let ids_of = |names: &[String]| -> Result<Vec<i64>, ApiError> {
+        names
+            .iter()
+            .map(|name| {
+                member_ids.get(&name.to_lowercase()).copied().ok_or_else(|| {
+                    ApiError::LoadoutValidationError(format!(
+                        "{} is not a member of this group",
+                        name
+                    ))
+                })
+            })
+            .collect()
+    };
+    let member_order = ids_of(&update.member_order)?;
+    let hidden_member_ids = ids_of(&update.hidden_members)?;
+
     transaction
         .execute(
-            "UPDATE groupironman.loadout_setups SET name=$1, version=version+1, updated_at=NOW() WHERE setup_id=$2",
-            &[&update.name, &setup_id],
+            "UPDATE groupironman.loadout_setups SET name=$1, version=version+1, updated_at=NOW(), member_order=$3, hidden_member_ids=$4 WHERE setup_id=$2",
+            &[&update.name, &setup_id, &member_order, &hidden_member_ids],
         )
         .await?;
     transaction

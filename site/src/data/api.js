@@ -239,8 +239,14 @@ class Api {
 
   async updateLoadoutSetup(setup) {
     if (this.exampleDataEnabled) return exampleData.updateLoadoutSetup(setup);
-    const { name, version, members } = setup;
-    return this.loadoutRequest(`${this.loadoutsUrl}/${setup.id}`, "PUT", { name, version, members });
+    const { name, version, members, member_order, hidden_members } = setup;
+    return this.loadoutRequest(`${this.loadoutsUrl}/${setup.id}`, "PUT", {
+      name,
+      version,
+      members,
+      member_order,
+      hidden_members,
+    });
   }
 
   async deleteLoadoutSetup(setupId) {

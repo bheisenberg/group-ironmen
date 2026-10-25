@@ -3,8 +3,9 @@ use crate::db;
 use crate::error::ApiError;
 use crate::models::{
     AmIInGroupRequest, CreateLoadoutSetup, GroupMember, GroupSkillData, LoadoutSetup,
-    MemberLoadout, MemberOrder, RenameGroupMember, UpdateLoadoutSetup, LOADOUT_EQUIPMENT_LEN,
-    LOADOUT_INVENTORY_LEN, MAX_LOADOUT_SETUP_NAME_LEN, SHARED_MEMBER,
+    MemberLoadout, MemberOrder, RenameGroupMember, UpdateLoadoutSetup,
+    LEGACY_LOADOUT_EQUIPMENT_LEN, LOADOUT_EQUIPMENT_LEN, LOADOUT_INVENTORY_LEN,
+    MAX_LOADOUT_SETUP_NAME_LEN, SHARED_MEMBER,
 };
 use crate::validators::{valid_name, validate_member_prop_length, ArrayFormat};
 use actix_web::{delete, get, post, put, web, Error, HttpResponse};
@@ -296,7 +297,9 @@ fn validate_member_loadout(member_name: &str, loadout: &MemberLoadout) -> Result
         ("equipment", &loadout.equipment, LOADOUT_EQUIPMENT_LEN),
         ("inventory", &loadout.inventory, LOADOUT_INVENTORY_LEN),
     ] {
-        if values.len() != expected_len {
+        // Pages loaded before the quiver slot was added still send the old equipment length
+        let legacy = field == "equipment" && values.len() == LEGACY_LOADOUT_EQUIPMENT_LEN;
+        if values.len() != expected_len && !legacy {
             return Err(ApiError::LoadoutValidationError(format!(
                 "{} {} must have {} values, got {}",
                 member_name,

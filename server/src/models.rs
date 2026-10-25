@@ -119,8 +119,11 @@ pub struct CaptchaVerifyResponse {
 }
 
 // Gear loadouts: a group has named setups, and each setup holds at most one loadout per member.
-// equipment is 14 [item id, quantity] pairs indexed by equipment slot, inventory is 28 pairs.
-pub const LOADOUT_EQUIPMENT_LEN: usize = 28;
+// equipment is 15 [item id, quantity] pairs indexed by equipment slot (the game's 14 plus a
+// worn quiver's ammo), inventory is 28 pairs.
+pub const LOADOUT_EQUIPMENT_LEN: usize = 30;
+// Loadouts saved before the quiver slot was added have the game's 14 equipment slots
+pub const LEGACY_LOADOUT_EQUIPMENT_LEN: usize = 28;
 pub const LOADOUT_INVENTORY_LEN: usize = 56;
 pub const MAX_LOADOUT_SETUPS_PER_GROUP: i64 = 50;
 pub const MAX_LOADOUT_SETUP_NAME_LEN: usize = 40;
@@ -137,6 +140,10 @@ pub struct LoadoutSetup {
     pub name: String,
     pub version: i32,
     pub members: std::collections::HashMap<String, MemberLoadout>,
+    // How the gear page lists members for this setup: member_order goes first (anyone missing
+    // follows in the group's order), and hidden_members aren't shown
+    pub member_order: Vec<String>,
+    pub hidden_members: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -149,6 +156,10 @@ pub struct UpdateLoadoutSetup {
     pub name: String,
     pub version: i32,
     pub members: std::collections::HashMap<String, MemberLoadout>,
+    #[serde(default)]
+    pub member_order: Vec<String>,
+    #[serde(default)]
+    pub hidden_members: Vec<String>,
 }
 
 // The order members are listed in across the site, set from the settings page

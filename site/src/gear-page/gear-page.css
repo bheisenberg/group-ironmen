@@ -70,6 +70,12 @@
   height: 32px;
 }
 
+/* Top left, across from the head slot, like the game's quiver slot */
+.gear-page__quiver-slot {
+  left: 29px;
+  top: 0;
+}
+
 .gear-page__slot {
   cursor: pointer;
   box-sizing: border-box;
@@ -261,8 +267,19 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   width: 100%;
+}
+
+.gear-page__overview-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.gear-page__hidden-member {
+  opacity: 0.6;
 }
 
 .gear-page__overview-head h3 {
