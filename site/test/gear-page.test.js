@@ -463,48 +463,6 @@ describe("gear page", () => {
     });
   });
 
-  describe("copying setups", () => {
-    const copyPage = () => {
-      const page = makePage({ owned: {}, members: { Alice: loadoutWith({ equipment: { 3: [WHIP, 1] } }) } });
-      page.currentSetup.hidden_members = ["Bob"];
-      page.renderAll = vi.fn();
-      page.setupNameInput = { focus: vi.fn(), select: vi.fn() };
-      vi.spyOn(api, "createLoadoutSetup").mockResolvedValue({
-        ok: true,
-        status: 200,
-        data: { id: 2, name: "ToB (copy)", version: 1, members: {}, member_order: [], hidden_members: [] },
-      });
-      vi.spyOn(api, "updateLoadoutSetup").mockResolvedValue({ ok: true, status: 200, data: { version: 2 } });
-      return page;
-    };
-
-    it("duplicates a setup with its unsaved edits, keeping the original's edits", async () => {
-      const page = copyPage();
-      page.dirtySetupIds.add(1);
-      await page.copySetup(true);
-
-      const copy = page.setups.find((x) => x.id === 2);
-      expect(copy.name).toBe("ToB (copy)");
-      expect(copy.members.Alice.equipment[6]).toBe(WHIP);
-      expect(copy.hidden_members).toEqual(["Bob"]);
-      expect(copy.members.Alice).not.toBe(page.setups[0].members.Alice);
-      expect(page.currentSetupId).toBe(2);
-      expect(page.dirtySetupIds.has(1)).toBe(true);
-    });
-
-    it("saves edits as a new setup and puts the original back to its saved version", async () => {
-      const page = copyPage();
-      page.dirtySetupIds.add(1);
-      const savedToB = { id: 1, name: "ToB", version: 1, members: {} };
-      vi.spyOn(api, "getLoadouts").mockResolvedValue({ ok: true, status: 200, data: [savedToB] });
-      await page.copySetup(false);
-
-      expect(page.setups.find((x) => x.id === 2).members.Alice.equipment[6]).toBe(WHIP);
-      expect(page.setups.find((x) => x.id === 1)).toBe(savedToB);
-      expect(page.dirtySetupIds.size).toBe(0);
-    });
-  });
-
   describe("tag tab export", () => {
     it("lays out equipment like the equipment screen and the inventory 4 wide beside it", () => {
       const loadout = loadoutWith({
@@ -591,21 +549,90 @@ describe("gear page", () => {
     });
   });
 
-  it("does not save until Save is clicked", async () => {
-    vi.useFakeTimers();
-    const page = makePage({ owned: { [WHIP]: 1 } });
-    delete page.markDirty; // use the real one
-    const update = vi.spyOn(api, "updateLoadoutSetup").mockResolvedValue({ ok: true, status: 200, data: { version: 2 } });
-    page.selection = { kind: "equipment", slot: 3 };
+  describe("charged items", () => {
+    const SCYTHE = 22325;
+    const SCYTHE_UNCHARGED = 22486;
+    const CELESTIAL_RING = 25541;
+    const CELESTIAL_RING_UNCHARGED = 25539;
+    const at = (member, kind, n) => (kind === "equipment" ? { member, kind, slot: n } : { member, kind, index: n });
+    const chargedPage = (owned, members = {}) => {
+      const page = makePage({ owned, members });
+      page.itemSlots.slots[SCYTHE] = page.itemSlots.slots[SCYTHE_UNCHARGED] = 3;
+      page.itemSlots.chargeForms = new Map([
+        [SCYTHE, [SCYTHE, SCYTHE_UNCHARGED]],
+        [SCYTHE_UNCHARGED, [SCYTHE, SCYTHE_UNCHARGED]],
+        [CELESTIAL_RING, [CELESTIAL_RING, CELESTIAL_RING_UNCHARGED]],
+        [CELESTIAL_RING_UNCHARGED, [CELESTIAL_RING, CELESTIAL_RING_UNCHARGED]],
+      ]);
+      return page;
+    };
 
+    it("places the charged form of an uncharged item", () => {
+      const page = chargedPage({ [SCYTHE_UNCHARGED]: 1 });
+      page.selection = { kind: "equipment", slot: 3 };
+      page.placeItem(SCYTHE_UNCHARGED);
+      expect(page.loadoutFor("Alice").equipment[6]).toBe(SCYTHE);
+      expect(page.placeItemAt(at("Bob", "equipment", 3), SCYTHE_UNCHARGED, true)).toBe(false);
+    });
+
+    it("counts charged and uncharged forms as one item without warning", () => {
+      const page = chargedPage({ [SCYTHE_UNCHARGED]: 1 }, { Alice: loadoutWith({ equipment: { 3: [SCYTHE, 1] } }) });
+      page.warningsEl = document.createElement("div");
+      page.renderWarnings(page.usedQuantities());
+      expect(page.warningsEl.textContent).toBe("");
+      expect(page.slotHtml(SCYTHE, 1, page.usedQuantities(), "Alice")).not.toContain("gear-page__over");
+      expect(page.availableQuantity(SCYTHE_UNCHARGED, page.usedQuantities(), null)).toBe(0);
+    });
+
+    it("warns once when the forms together are over the limit", () => {
+      const page = chargedPage(
+        { [SCYTHE_UNCHARGED]: 1 },
+        {
+          Alice: loadoutWith({ equipment: { 3: [SCYTHE, 1] } }),
+          Bob: loadoutWith({ equipment: { 3: [SCYTHE_UNCHARGED, 1] } }),
+        }
+      );
+      page.warningsEl = document.createElement("div");
+      Item.itemDetails = { [SCYTHE]: { name: "Scythe of Vitur" } };
+      page.renderWarnings(page.usedQuantities());
+      expect(page.warningsEl.querySelectorAll("li")).toHaveLength(1);
+      expect(page.warningsEl.textContent).toContain("Scythe of Vitur: setup uses 2, group has 1");
+    });
+
+    it("keeps an item untradeable in every form with its owner", () => {
+      const page = chargedPage({});
+      page.itemSlots.slots[CELESTIAL_RING] = 12;
+      page.itemSlots.untradeable = new Set([CELESTIAL_RING, CELESTIAL_RING_UNCHARGED]);
+      groupData.items = {
+        [CELESTIAL_RING_UNCHARGED]: { id: CELESTIAL_RING_UNCHARGED, quantity: 1, quantities: { Alice: 1, Bob: 0 } },
+      };
+      expect(page.isOwnerOnly(CELESTIAL_RING)).toBe(true);
+      expect(page.placeItemAt(at("Bob", "equipment", 12), CELESTIAL_RING_UNCHARGED)).toBe(false);
+      expect(page.placeItemAt(at("Alice", "equipment", 12), CELESTIAL_RING_UNCHARGED)).toBe(true);
+      expect(page.loadoutFor("Alice").equipment[24]).toBe(CELESTIAL_RING);
+    });
+  });
+
+  it("autosaves a burst of edits once they pause", async () => {
+    vi.useFakeTimers();
+    const page = makePage({ owned: { [WHIP]: 1, [DEFENDER]: 1 } });
+    delete page.markDirty; // use the real one
+    page.renderSetupList = vi.fn();
+    const update = vi.spyOn(api, "updateLoadoutSetup").mockResolvedValue({ ok: true, status: 200, data: { version: 2 } });
+
+    page.selection = { kind: "equipment", slot: 3 };
     page.placeItem(WHIP);
-    await vi.advanceTimersByTimeAsync(10000);
+    await vi.advanceTimersByTimeAsync(500);
+    page.selection = { kind: "equipment", slot: 5 };
+    page.placeItem(DEFENDER);
+    await vi.advanceTimersByTimeAsync(500);
     expect(update).not.toHaveBeenCalled();
     expect(page.dirtySetupIds.has(1)).toBe(true);
 
-    await page.saveDirtySetups();
+    await vi.advanceTimersByTimeAsync(1000);
     expect(update).toHaveBeenCalledTimes(1);
     expect(page.dirtySetupIds.size).toBe(0);
+    vi.useRealTimers();
   });
 
   it("keeps unsaved edits to other setups when one setup conflicts", async () => {

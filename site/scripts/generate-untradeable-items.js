@@ -5,6 +5,8 @@
 // Items that are only untradeable while charged (Toxic blowpipe, Scythe of Vitur, ...) are also
 // left out, since they can be uncharged into a tradeable form and charged again. These are the
 // untradeable versions on a charged-item page that also has a tradeable version.
+// Also generates public/data/item_charge_forms.json, the charged and uncharged forms of the same
+// item, so the gear page can treat them as one item. Each entry is [charged form, other forms...].
 // Usage: node scripts/generate-untradeable-items.js
 const fs = require("fs");
 
@@ -18,6 +20,32 @@ const REVERTIBLE_ITEMS = [
   28687 /* Blazing blowpipe (empty), a Toxic blowpipe with an ornament kit */,
   28688 /* Blazing blowpipe */,
 ];
+// Wiki version names of an item's charged form, in order of preference, and of its other forms. A
+// partially charged Trident of the Seas is the usual one, its fully charged version is "Charged".
+const CHARGED_VERSIONS = ["Partially charged", "Charged", "Active"];
+const UNCHARGED_VERSIONS = ["Uncharged", "Empty", "Inactive", "Inert", "New"];
+
+// [charged form, other forms...] for each charged-item page with a charged form and other forms
+function chargeForms(rows, chargedPages, itemData) {
+  const versionsByPage = new Map();
+  for (const row of rows) {
+    if (!chargedPages.has(row.page_name)) continue;
+    const ids = (Array.isArray(row.item_id) ? row.item_id : [row.item_id]).map((id) => parseInt(id));
+    if (!versionsByPage.has(row.page_name)) versionsByPage.set(row.page_name, []);
+    versionsByPage.get(row.page_name).push({ version: row.version_anchor, ids: ids.filter((id) => itemData[id]) });
+  }
+  const groups = [];
+  for (const versions of versionsByPage.values()) {
+    const charged = CHARGED_VERSIONS.map((name) => versions.find((x) => x.version === name)).find((x) => x?.ids.length);
+    if (!charged) continue;
+    const others = versions
+      .filter((x) => CHARGED_VERSIONS.includes(x.version) || UNCHARGED_VERSIONS.includes(x.version))
+      .flatMap((x) => x.ids)
+      .filter((id) => id !== charged.ids[0]);
+    if (others.length > 0) groups.push([charged.ids[0], ...others]);
+  }
+  return groups.sort((a, b) => a[0] - b[0]);
+}
 
 async function wikiApi(params) {
   const url = `https://oldschool.runescape.wiki/api.php?format=json&${new URLSearchParams(params)}`;
@@ -27,7 +55,7 @@ async function wikiApi(params) {
 }
 
 async function fetchPage(offset) {
-  const query = `bucket('infobox_item').select('item_id','tradeable','page_name').limit(${PAGE_SIZE}).offset(${offset}).run()`;
+  const query = `bucket('infobox_item').select('item_id','tradeable','page_name','version_anchor').limit(${PAGE_SIZE}).offset(${offset}).run()`;
   const body = await wikiApi({ action: "bucket", query });
   if (!Array.isArray(body.bucket)) throw new Error(`Unexpected wiki response: ${JSON.stringify(body).slice(0, 200)}`);
   return body.bucket;
@@ -77,6 +105,10 @@ async function main() {
   console.log(
     `Wrote ${ids.length} untradeable items (${tradeable.size} tradeable, ${chargedCount} untradeable only while charged or ornamented)`
   );
+
+  const groups = chargeForms(rows, chargedPages, itemData);
+  fs.writeFileSync("public/data/item_charge_forms.json", JSON.stringify(groups));
+  console.log(`Wrote ${groups.length} charged items with other forms`);
 }
 
 main().catch((err) => {

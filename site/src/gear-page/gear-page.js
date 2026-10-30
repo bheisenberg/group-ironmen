@@ -31,7 +31,9 @@ const QUIVER_SLOT = 14;
 const EQUIPMENT_SIZE = 15;
 const INVENTORY_SIZE = 28;
 const MAX_PICKER_RESULTS = 120;
-const MAX_SETUP_NAME_LENGTH = 40;
+// How long after the last edit changes are saved, and how long to wait before retrying a failed save
+const AUTOSAVE_DELAY_MS = 1000;
+const AUTOSAVE_RETRY_MS = 10000;
 
 // The combat simulator that "Open in sim" opens a member's loadout in. It loads the saved setup
 // from this site, so change this to point the buttons at another sim.
@@ -140,16 +142,25 @@ let itemSlotsPromise;
 function loadItemSlots() {
   if (!itemSlotsPromise) {
     const getJson = (url) => fetch(url).then((response) => response.json());
-    itemSlotsPromise = Promise.all([getJson("/data/item_slots.json"), getJson("/data/item_untradeable.json")]).then(
-      ([{ slots, twoHanded }, untradeable]) => ({
-        slots,
-        twoHanded: new Set(twoHanded),
-        untradeable: new Set(untradeable),
-      })
-    );
+    itemSlotsPromise = Promise.all([
+      getJson("/data/item_slots.json"),
+      getJson("/data/item_untradeable.json"),
+      getJson("/data/item_charge_forms.json"),
+    ]).then(([{ slots, twoHanded }, untradeable, chargeForms]) => ({
+      slots,
+      twoHanded: new Set(twoHanded),
+      untradeable: new Set(untradeable),
+      chargeForms: chargeFormsByItem(chargeForms),
+    }));
     itemSlotsPromise.catch(() => (itemSlotsPromise = undefined));
   }
   return itemSlotsPromise;
+}
+
+// Each of an item's forms, e.g. a Scythe of Vitur and its uncharged form, maps to all of its forms
+// with the charged one first
+function chargeFormsByItem(groups) {
+  return new Map(groups.flatMap((forms) => forms.map((itemId) => [itemId, forms])));
 }
 
 function emptyLoadout() {
@@ -199,9 +210,7 @@ export class GearPage extends BaseElement {
     this.quantityInput = this.querySelector(".gear-page__quantity");
     this.warningsEl = this.querySelector(".gear-page__warnings");
     this.overviewEl = this.querySelector(".gear-page__overview");
-    this.saveButton = this.querySelector('[data-action="save"]');
-    this.discardButton = this.querySelector('[data-action="discard"]');
-    this.saveAsButton = this.querySelector('[data-action="save-as"]');
+    this.setupListEl = this.querySelector(".gear-page__setup-list");
 
     // The route reuses this element, so unsaved edits survive leaving the page and coming back.
     // Start over only on first load or when a different group is logged in.
@@ -251,17 +260,21 @@ export class GearPage extends BaseElement {
     this.subscribe("items-updated", () => this.renderLoadoutAndPicker());
     this.setStatus("");
     this.openLinkedSetup();
-    this.updateSaveState();
     this.renderAll();
+    // Edits kept from the last visit weren't saved yet
+    if (this.dirtySetupIds.size > 0) this.scheduleAutosave();
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
+    // Leaving the page saves right away instead of waiting out the autosave delay
+    if (this.dirtySetupIds?.size > 0) this.saveDirtySetups();
   }
 
-  // Ask before closing or reloading the tab with unsaved changes
+  // Ask before closing or reloading the tab while changes are still saving
   handleBeforeUnload(event) {
     if (this.dirtySetupIds.size === 0) return;
+    this.saveDirtySetups();
     event.preventDefault();
     event.returnValue = "";
   }
@@ -294,13 +307,18 @@ export class GearPage extends BaseElement {
     const result = await api.getLoadouts();
     if (!result.ok) throw new Error(result.data || result.status);
     this.setups = result.data.map(normalizeSetup);
-    if (!this.currentSetup) this.currentSetupId = this.setups[0]?.id ?? null;
+    if (!this.currentSetup) this.currentSetupId = null;
   }
 
-  // A shared link names its setup, e.g. /group/gear?setup=12
+  // A shared link names its setup, e.g. /group/gear?setup=12. Without one the page opens on the
+  // list of setups.
   openLinkedSetup() {
     const linked = new URLSearchParams(window.location.search).get("setup");
-    if (linked === null) return;
+    if (linked === null) {
+      this.currentSetupId = null;
+      this.selection = null;
+      return;
+    }
     const setupId = parseInt(linked);
     if (this.setups.some((setup) => setup.id === setupId)) {
       if (setupId !== this.currentSetupId) this.selection = null;
@@ -325,13 +343,31 @@ export class GearPage extends BaseElement {
   // The export button's dropdown, which reuses the right-click menu, under the button
   openExportMenu(button) {
     const member = utility.escapeHtml(button.getAttribute("data-member"));
-    this.contextMenu.innerHTML = `
-      <button type="button" data-action="export-tag-tab" data-member="${member}">Equipment screen layout</button>
-      <button type="button" data-action="export-tag-tab" data-zigzag data-member="${member}">Zigzag layout</button>`;
-    const rect = button.getBoundingClientRect();
-    this.contextMenu.style.left = `${rect.left}px`;
-    this.contextMenu.style.top = `${rect.bottom}px`;
+    this.openMenuUnder(
+      button,
+      `<button type="button" data-action="export-tag-tab" data-member="${member}">Equipment screen layout</button>
+      <button type="button" data-action="export-tag-tab" data-zigzag data-member="${member}">Zigzag layout</button>`
+    );
+  }
+
+  // A member card's "..." menu, for the rarely needed options
+  openMemberMenu(button) {
+    const member = utility.escapeHtml(button.getAttribute("data-member"));
+    this.openMenuUnder(
+      button,
+      `<button type="button" data-action="hide-member" data-member="${member}">Remove player</button>`,
+      true
+    );
+  }
+
+  // Opens the right-click menu as a dropdown under a button, lined up with its right edge if alignRight
+  openMenuUnder(button, html, alignRight = false) {
+    this.contextMenu.innerHTML = html;
     this.contextMenu.classList.add("open");
+    const rect = button.getBoundingClientRect();
+    const left = alignRight ? rect.right - this.contextMenu.offsetWidth : rect.left;
+    this.contextMenu.style.left = `${Math.max(0, left)}px`;
+    this.contextMenu.style.top = `${rect.bottom}px`;
   }
 
   async copyTagTab(member, zigzag) {
@@ -352,15 +388,16 @@ export class GearPage extends BaseElement {
     }
   }
 
-  // Opens a member's loadout in the sim in a new tab. The sim reads the saved setup, so unsaved
-  // edits don't go with it.
-  openInSim(member) {
+  // Opens a member's loadout in the sim in a new tab. The sim reads the saved setup, so pending
+  // edits are saved first.
+  async openInSim(member) {
     const setup = this.currentSetup;
     const loadout = this.loadoutFor(member);
     if (setup?.id == null || !loadout || isEmptyLoadout(loadout)) return;
+    if (this.dirtySetupIds.has(setup.id)) await this.saveDirtySetups();
     window.open(simLoadoutUrl(setup.id, member), "_blank", "noopener");
     if (this.dirtySetupIds.has(setup.id)) {
-      this.setStatus("The sim opened the last saved version. Save to include your changes.");
+      this.setStatus("Couldn't save your changes, so the sim opened the last saved version", true);
     }
   }
 
@@ -368,10 +405,11 @@ export class GearPage extends BaseElement {
     const setup = this.currentSetup;
     if (!setup) return;
     const url = `${window.location.origin}/group/gear?setup=${setup.id}`;
+    if (this.dirtySetupIds.has(setup.id)) await this.saveDirtySetups();
     try {
       await navigator.clipboard.writeText(url);
       this.setStatus(
-        this.dirtySetupIds.has(setup.id) ? "Link copied, but save first so others see your changes" : "Link copied"
+        this.dirtySetupIds.has(setup.id) ? "Link copied, but your latest changes aren't saved yet" : "Link copied"
       );
     } catch {
       this.setStatus(`Couldn't copy the link: ${url}`, true);
@@ -431,24 +469,36 @@ export class GearPage extends BaseElement {
     return used;
   }
 
-  // The item ids that share an item's limit: its whole pool, or just itself
+  // The item ids that share an item's limit: its whole pool, its charged and uncharged forms, or
+  // just itself
   limitIds(itemId) {
     const pool = POOL_BY_ITEM.get(itemId);
-    return pool ? [...pool.forms, ...pool.alsoCounts] : [itemId];
+    if (pool) return [...pool.forms, ...pool.alsoCounts];
+    return this.itemSlots?.chargeForms?.get(itemId) || [itemId];
+  }
+
+  // Items go into a setup charged, since charges are easy to add before the trip
+  chargedForm(itemId) {
+    return this.itemSlots?.chargeForms?.get(itemId)?.[0] ?? itemId;
   }
 
   // Untradeable items can't be passed between members (not even through group storage), so only
   // the member holding one can use it. Items that are only untradeable while charged (blowpipes,
-  // tridents, ...) aren't in the untradeable list to begin with. Synapse weapons are untradeable but are left out: they
-  // can be dismantled into a tradeable synapse and made again.
+  // tridents, ...) aren't in the untradeable list to begin with, and an item with any tradeable
+  // form can be traded in that form. Synapse weapons are untradeable but are left out: they can be
+  // dismantled into a tradeable synapse and made again.
   isOwnerOnly(itemId) {
-    return !!this.itemSlots?.untradeable?.has(itemId) && !POOL_BY_ITEM.has(itemId);
+    const untradeable = this.itemSlots?.untradeable;
+    return !!untradeable && !POOL_BY_ITEM.has(itemId) && this.limitIds(itemId).every((id) => untradeable.has(id));
   }
 
   // With a member, an owner-only item counts just what that member holds and uses
   ownedQuantity(itemId, member = null) {
-    if (member && this.isOwnerOnly(itemId)) return groupData.items[itemId]?.quantities?.[member] || 0;
-    return this.limitIds(itemId).reduce((total, id) => total + (groupData.items[id]?.quantity || 0), 0);
+    const owner = member && this.isOwnerOnly(itemId) ? member : null;
+    return this.limitIds(itemId).reduce((total, id) => {
+      const item = groupData.items[id];
+      return total + ((owner ? item?.quantities?.[owner] : item?.quantity) || 0);
+    }, 0);
   }
 
   usedQuantity(itemId, used, member = null) {
@@ -458,10 +508,11 @@ export class GearPage extends BaseElement {
 
   memberUsedQuantity(itemId, member) {
     const loadout = this.loadoutFor(member);
+    const ids = this.limitIds(itemId);
     let total = 0;
     for (const array of loadout ? [loadout.equipment, loadout.inventory] : []) {
       for (let i = 0; i < array.length; i += 2) {
-        if (array[i] === itemId) total += array[i + 1];
+        if (ids.includes(array[i])) total += array[i + 1];
       }
     }
     return total;
@@ -619,6 +670,7 @@ export class GearPage extends BaseElement {
   }
 
   placeItem(itemId) {
+    itemId = this.chargedForm(itemId);
     const loadout = this.loadoutFor(this.selectedMember, true);
     if (!loadout || !this.selection) return;
     const available = this.availableQuantity(itemId, this.usedQuantities());
@@ -646,6 +698,7 @@ export class GearPage extends BaseElement {
   // Places an item dragged from the picker into any member's slot, replacing what's there like
   // picking does. Returns whether it's allowed; with dryRun nothing is changed.
   placeItemAt(location, itemId, dryRun = false) {
+    itemId = this.chargedForm(itemId);
     if (!this.memberNames.includes(location.member) || !this.fitsLocation(itemId, location)) return false;
     const available = this.availableQuantity(itemId, this.usedQuantities(), location);
     if (available <= 0) return false;
@@ -707,15 +760,13 @@ export class GearPage extends BaseElement {
   markDirty(setup) {
     if (!setup) return;
     this.dirtySetupIds.add(setup.id);
-    this.updateSaveState();
+    this.scheduleAutosave();
   }
 
-  updateSaveState() {
-    const dirty = this.dirtySetupIds.size;
-    this.updateSaveButtons();
-    if (dirty > 0 && !this.saving) {
-      this.setStatus(dirty === 1 ? "Unsaved changes" : `Unsaved changes in ${dirty} setups`);
-    }
+  // Saves once edits have paused for a moment, so a burst of changes is one save
+  scheduleAutosave(delay = AUTOSAVE_DELAY_MS) {
+    clearTimeout(this.autosaveTimer);
+    this.autosaveTimer = setTimeout(() => this.saveDirtySetups(), delay);
   }
 
   // The loadouts worth saving: current members' non-empty ones
@@ -728,13 +779,6 @@ export class GearPage extends BaseElement {
     return members;
   }
 
-  updateSaveButtons() {
-    const dirty = this.dirtySetupIds.size;
-    if (this.saveButton) this.saveButton.disabled = dirty === 0 || this.saving;
-    if (this.discardButton) this.discardButton.disabled = dirty === 0 || this.saving;
-    if (this.saveAsButton) this.saveAsButton.disabled = !this.dirtySetupIds.has(this.currentSetupId) || this.copying;
-  }
-
   // The member layout, without members who have since left the group
   savableLayout(setup) {
     const memberNames = new Set(this.memberNames);
@@ -744,12 +788,22 @@ export class GearPage extends BaseElement {
     };
   }
 
-  // Saves every setup with unsaved changes
-  async saveDirtySetups() {
-    if (this.saving) return; // the in-flight save picks up anything newly dirty when it finishes
+  // Saves every setup with unsaved changes. Calls during a save wait for it, and it picks up
+  // anything newly dirty before it finishes.
+  saveDirtySetups() {
+    clearTimeout(this.autosaveTimer);
+    if (!this.savePromise) {
+      this.savePromise = this.saveAll().finally(() => {
+        this.savePromise = null;
+      });
+    }
+    return this.savePromise;
+  }
+
+  async saveAll() {
     this.saving = true;
-    this.updateSaveState();
     let failed = false;
+    let needsName = false;
     let conflictMessage = null;
     let setupId;
     try {
@@ -762,6 +816,7 @@ export class GearPage extends BaseElement {
           this.dirtySetupIds.add(setupId);
           this.setStatus("Setup needs a name before it can be saved", true);
           failed = true;
+          needsName = true;
           break;
         }
 
@@ -794,36 +849,16 @@ export class GearPage extends BaseElement {
       failed = true;
     } finally {
       this.saving = false;
+      // Refresh the "Unsaved changes" labels on the setup cards
+      if (this.isConnected && !this.currentSetup) this.renderSetupList();
       if (failed) {
-        if (this.saveButton) this.saveButton.disabled = false;
-        if (this.discardButton) this.discardButton.disabled = false;
-      } else {
-        this.updateSaveState();
+        // Naming the setup saves it, so only retry other failures
+        if (!needsName && this.isConnected) this.scheduleAutosave(AUTOSAVE_RETRY_MS);
+      } else if (conflictMessage) {
         // Saving later setups overwrote the status, so show the conflict again
-        if (conflictMessage) this.setStatus(conflictMessage, true);
+        this.setStatus(conflictMessage, true);
       }
     }
-  }
-
-  discardChanges() {
-    confirmDialogManager.confirm({
-      headline: "Discard unsaved changes?",
-      body: "Every setup goes back to how it was last saved.",
-      yesCallback: async () => {
-        this.dirtySetupIds.clear();
-        try {
-          await this.loadSetups();
-        } catch (error) {
-          this.setStatus(`Failed to reload setups: ${error}`, true);
-          return;
-        }
-        this.selection = null;
-        this.renderAll();
-        this.updateSaveState();
-        this.setStatus("Changes discarded");
-      },
-      noCallback: () => {},
-    });
   }
 
   // Replaces just the conflicting setup with the server's copy, so unsaved edits in other
@@ -836,7 +871,7 @@ export class GearPage extends BaseElement {
     this.setups = latest
       ? this.setups.map((x) => (x.id === setupId ? normalizeSetup(latest) : x))
       : this.setups.filter((x) => x.id !== setupId);
-    if (!this.currentSetup) this.currentSetupId = this.setups[0]?.id ?? null;
+    if (!this.currentSetup) this.currentSetupId = null;
     const message = latest
       ? `${name} was changed by someone else, so its latest version was loaded and your edits to it were dropped`
       : `${name} was deleted by someone else`;
@@ -859,15 +894,7 @@ export class GearPage extends BaseElement {
     if (!target || !this.contains(target)) return;
     const action = target.getAttribute("data-action");
 
-    if (action === "save") {
-      this.saveDirtySetups();
-    } else if (action === "discard") {
-      this.discardChanges();
-    } else if (action === "save-as") {
-      this.copySetup(false);
-    } else if (action === "duplicate-setup") {
-      this.copySetup(true);
-    } else if (action === "new-setup") {
+    if (action === "new-setup") {
       this.createSetup();
     } else if (action === "delete-setup") {
       this.deleteSetup();
@@ -879,6 +906,12 @@ export class GearPage extends BaseElement {
       this.openInSim(target.getAttribute("data-member"));
     } else if (action === "export-menu") {
       this.openExportMenu(target);
+    } else if (action === "member-menu") {
+      this.openMemberMenu(target);
+    } else if (action === "open-setup") {
+      this.openSetup(parseInt(target.getAttribute("data-setup-id")));
+    } else if (action === "all-setups") {
+      this.openSetup(null);
     } else if (action === "hide-member") {
       this.hideMember(target.getAttribute("data-member"));
     } else if (action === "show-member") {
@@ -1136,6 +1169,14 @@ export class GearPage extends BaseElement {
     this.renderAll();
   }
 
+  // Opens a setup, starting from its overview, or the list of setups with null
+  openSetup(setupId) {
+    this.currentSetupId = setupId;
+    this.view = "overview";
+    this.selection = null;
+    this.renderAll();
+  }
+
   handleSetupNameInput() {
     const setup = this.currentSetup;
     if (!setup) return;
@@ -1159,70 +1200,6 @@ export class GearPage extends BaseElement {
     this.setupNameInput.select();
   }
 
-  // Copies the current setup, unsaved edits included, into a new saved setup and opens it.
-  // Duplicate keeps the original's unsaved edits; Save as puts it back to its last saved version.
-  async copySetup(keepOriginal) {
-    const original = this.currentSetup;
-    if (!original || this.copying) return;
-    this.copying = true;
-    this.updateSaveButtons();
-    try {
-      const suffix = " (copy)";
-      const name = `${(original.name.trim() || "Setup").slice(0, MAX_SETUP_NAME_LENGTH - suffix.length)}${suffix}`;
-      const created = await api.createLoadoutSetup(name);
-      if (!created.ok) {
-        this.setStatus(`Failed to create setup: ${created.data || created.status}`, true);
-        return;
-      }
-      const members = JSON.parse(JSON.stringify(this.savableMembers(original)));
-      const layout = JSON.parse(JSON.stringify(this.savableLayout(original)));
-      const saved = await api.updateLoadoutSetup({
-        ...layout,
-        id: created.data.id,
-        name,
-        version: created.data.version,
-        members,
-      });
-      const copy = normalizeSetup({
-        ...created.data,
-        ...layout,
-        version: saved.ok ? saved.data.version : created.data.version,
-        members,
-      });
-      if (!keepOriginal) await this.revertSetup(original.id);
-
-      this.setups.push(copy);
-      this.currentSetupId = copy.id;
-      this.selection = null;
-      if (!saved.ok) this.dirtySetupIds.add(copy.id);
-      this.renderAll();
-      this.updateSaveState();
-      if (saved.ok) {
-        this.setStatus(keepOriginal ? `Duplicated ${original.name}` : `Saved as ${name}`);
-      } else {
-        this.setStatus(`Created ${name} but failed to save its loadouts: ${saved.data || saved.status}`, true);
-      }
-      this.setupNameInput.focus();
-      this.setupNameInput.select();
-    } catch (error) {
-      this.setStatus(`Failed to copy setup: ${error}`, true);
-    } finally {
-      this.copying = false;
-      this.updateSaveButtons();
-    }
-  }
-
-  // Drops a setup's unsaved edits by loading its saved version
-  async revertSetup(setupId) {
-    this.dirtySetupIds.delete(setupId);
-    const result = await api.getLoadouts();
-    if (!result.ok) throw new Error(result.data || result.status);
-    const latest = result.data.find((x) => x.id === setupId);
-    this.setups = latest
-      ? this.setups.map((x) => (x.id === setupId ? normalizeSetup(latest) : x))
-      : this.setups.filter((x) => x.id !== setupId);
-  }
-
   deleteSetup() {
     const setup = this.currentSetup;
     if (!setup) return;
@@ -1237,10 +1214,9 @@ export class GearPage extends BaseElement {
           return;
         }
         this.setups = this.setups.filter((x) => x.id !== setup.id);
-        this.currentSetupId = this.setups[0]?.id ?? null;
+        this.currentSetupId = null;
         this.selection = null;
         this.renderAll();
-        this.updateSaveState();
         this.setStatus("Deleted");
       },
       noCallback: () => {},
@@ -1258,6 +1234,7 @@ export class GearPage extends BaseElement {
   renderAll() {
     if (!this.visibleMembers.includes(this.selectedMember)) this.selectedMember = this.visibleMembers[0] || null;
     this.renderSetups();
+    this.renderSetupList();
     this.renderMembers();
     this.renderLoadoutAndPicker();
   }
@@ -1316,8 +1293,8 @@ export class GearPage extends BaseElement {
               <button class="men-button small" type="button" data-action="export-menu" data-member="${escapedName}"
                 title="More export layouts" ${isEmptyLoadout(loadout) ? "disabled" : ""}>&#9662;</button>
             </div>
-            <button class="men-button small" type="button" data-action="hide-member" data-member="${escapedName}"
-              title="Remove ${escapedName} from this setup">Remove</button>
+            <button class="men-button small" type="button" data-action="member-menu" data-member="${escapedName}"
+              title="More options">&hellip;</button>
           </div>
         </div>`;
       })
@@ -1341,15 +1318,45 @@ export class GearPage extends BaseElement {
     this.setupNameInput.disabled = !setup;
     this.querySelector('[data-action="delete-setup"]').disabled = !setup;
     this.querySelector('[data-action="copy-link"]').disabled = !setup;
-    this.querySelector('[data-action="duplicate-setup"]').disabled = !setup;
-    this.updateSaveButtons();
-    this.classList.toggle("gear-page--empty", !setup);
+    this.classList.toggle("gear-page--list", !setup);
     this.syncUrl();
+  }
+
+  // With no setup open, the page lists every setup to open, and a card to make a new one
+  renderSetupList() {
+    if (this.currentSetup) {
+      this.setupListEl.innerHTML = "";
+      return;
+    }
+    const cards = this.setups.map((setup) => {
+      const members = Object.entries(this.savableMembers(setup));
+      const weapons = members
+        .filter(([, loadout]) => loadout.equipment[WEAPON_SLOT * 2])
+        .map(([name, loadout]) => {
+          const itemId = loadout.equipment[WEAPON_SLOT * 2];
+          const title = utility.escapeHtml(`${name}: ${Item.itemName(itemId)}`);
+          return `<img src="${Item.imageUrl(itemId, 1)}" loading="lazy" title="${title}" />`;
+        })
+        .join("");
+      const info = members.length ? members.map(([name]) => name).join(", ") : "No loadouts yet";
+      const unsaved = this.dirtySetupIds.has(setup.id)
+        ? `<span class="gear-page__setup-card-unsaved">Unsaved changes</span>`
+        : "";
+      return `<button class="gear-page__setup-card rsborder rsbackground rsbackground-hover" type="button"
+          data-action="open-setup" data-setup-id="${setup.id}">
+          <span class="gear-page__setup-card-name">${utility.escapeHtml(setup.name) || "(unnamed)"}</span>
+          <span class="gear-page__setup-card-weapons">${weapons}</span>
+          <span class="gear-page__setup-card-info">${utility.escapeHtml(info)}</span>
+          ${unsaved}
+        </button>`;
+    });
+    cards.push(`<button class="gear-page__setup-card gear-page__setup-card--new rsborder rsbackground rsbackground-hover"
+        type="button" data-action="new-setup">+ New setup</button>`);
+    this.setupListEl.innerHTML = `<h2>Gear setups</h2><div class="gear-page__setup-cards">${cards.join("")}</div>`;
   }
 
   // Overview comes first, then a button per member that opens their loadout on its own
   renderMembers() {
-    const setup = this.currentSetup;
     const overview = this.view === "overview";
     const overviewButton = `<button class="men-button small ${overview ? "active" : ""}" type="button"
       data-action="view-overview">Overview</button>`;
@@ -1363,15 +1370,12 @@ export class GearPage extends BaseElement {
     this.membersEl.innerHTML =
       overviewButton +
       this.visibleMembers
-        .map((name) => {
-          const hasLoadout = setup?.members[name] && !isEmptyLoadout(setup.members[name]);
-          return `<button class="men-button small ${
+        .map(
+          (name) => `<button class="men-button small ${
             !overview && name === this.selectedMember ? "active" : ""
           }" type="button"
-          data-action="select-member" data-member="${utility.escapeHtml(name)}">${utility.escapeHtml(name)}${
-            hasLoadout ? " *" : ""
-          }</button>`;
-        })
+          data-action="select-member" data-member="${utility.escapeHtml(name)}">${utility.escapeHtml(name)}</button>`
+        )
         .join("") +
       hiddenButtons;
   }
@@ -1465,7 +1469,8 @@ export class GearPage extends BaseElement {
 
     const search = (this.searchElement.value || "").trim().toLowerCase();
     // Also offer pool forms the group doesn't hold directly but could make, like a Purging staff from a Scorching bow
-    const itemIds = new Set(Object.values(groupData.items).map((item) => item.id));
+    // Uncharged items are listed as their charged form, which is what picking them places
+    const itemIds = new Set(Object.values(groupData.items).map((item) => this.chargedForm(item.id)));
     for (const pool of ITEM_POOLS) {
       if (this.ownedQuantity(pool.forms[0]) > 0) pool.forms.forEach((form) => itemIds.add(form));
     }
@@ -1519,8 +1524,12 @@ export class GearPage extends BaseElement {
   // Items can run short after a setup is made, e.g. supplies get used up
   renderWarnings(used) {
     const warnings = [];
-    const checkedPools = new Set();
+    // Items sharing a limit, like a pool or charged and uncharged forms, are checked once
+    const checked = new Set();
     for (const itemId of used.keys()) {
+      const limitKey = this.limitIds(itemId)[0];
+      if (checked.has(limitKey)) continue;
+      checked.add(limitKey);
       if (this.isOwnerOnly(itemId)) {
         for (const member of this.memberNames) {
           const quantity = this.memberUsedQuantity(itemId, member);
@@ -1538,14 +1547,12 @@ export class GearPage extends BaseElement {
         continue;
       }
       const pool = POOL_BY_ITEM.get(itemId);
-      if (pool && checkedPools.has(pool)) continue;
-      if (pool) checkedPools.add(pool);
       const quantity = this.usedQuantity(itemId, used);
       const owned = this.ownedQuantity(itemId);
       if (quantity > owned) {
         const name = pool
           ? `${pool.name} items (${pool.forms.map((form) => Item.itemName(form)).join(", ")})`
-          : Item.itemName(itemId);
+          : Item.itemName(this.chargedForm(itemId));
         warnings.push(
           `${utility.escapeHtml(name)}: setup uses ${quantity.toLocaleString()}, group has ${owned.toLocaleString()}`
         );
