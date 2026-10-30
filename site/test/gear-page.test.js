@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { GearPage, tagTabExport } from "../src/gear-page/gear-page";
+import { GearPage, SIM_URL, simLoadoutUrl, tagTabExport } from "../src/gear-page/gear-page";
 import { groupData } from "../src/data/group-data";
 import { api } from "../src/data/api";
 import { Item } from "../src/data/item";
@@ -378,6 +378,41 @@ describe("gear page", () => {
       page.openLinkedSetup();
       expect(page.currentSetupId).toBe(1);
       expect(page.setStatus).toHaveBeenLastCalledWith(expect.stringContaining("doesn't exist"), true);
+    });
+  });
+
+  describe("open in sim", () => {
+    it("links to the member's loadout in the saved setup", () => {
+      expect(SIM_URL).toBe("https://sim.meatmen.men");
+      expect(simLoadoutUrl(12, "Iron Bob & Co")).toBe(
+        "https://sim.meatmen.men/?gim-setup=12&gim-member=Iron%20Bob%20%26%20Co"
+      );
+    });
+
+    it("shows a button only for members with a loadout in a saved setup", () => {
+      const page = makePage({ owned: { [WHIP]: 1 }, members: { Alice: loadoutWith({ equipment: { 3: [WHIP, 1] } }) } });
+      page.overviewEl = document.createElement("div");
+      page.renderOverview(new Map());
+      const buttons = [...page.overviewEl.querySelectorAll('[data-action="open-in-sim"]')];
+      expect(buttons.map((button) => button.getAttribute("data-member"))).toEqual(["Alice"]);
+
+      page.setups[0].id = null;
+      page.currentSetupId = null;
+      page.renderOverview(new Map());
+      expect(page.overviewEl.querySelector('[data-action="open-in-sim"]')).toBeNull();
+    });
+
+    it("opens the sim in a new tab, and not for an empty loadout", () => {
+      const page = makePage({ owned: { [WHIP]: 1 }, members: { Alice: loadoutWith({ equipment: { 3: [WHIP, 1] } }) } });
+      const open = vi.spyOn(window, "open").mockImplementation(() => null);
+      try {
+        page.openInSim("Bob");
+        expect(open).not.toHaveBeenCalled();
+        page.openInSim("Alice");
+        expect(open).toHaveBeenCalledWith(simLoadoutUrl(1, "Alice"), "_blank", "noopener");
+      } finally {
+        open.mockRestore();
+      }
     });
   });
 

@@ -33,6 +33,15 @@ const INVENTORY_SIZE = 28;
 const MAX_PICKER_RESULTS = 120;
 const MAX_SETUP_NAME_LENGTH = 40;
 
+// The combat simulator that "Open in sim" opens a member's loadout in. It loads the saved setup
+// from this site, so change this to point the buttons at another sim.
+export const SIM_URL = "https://sim.meatmen.men";
+
+// The sim page for one member's loadout in a saved setup
+export function simLoadoutUrl(setupId, member) {
+  return `${SIM_URL}/?gim-setup=${encodeURIComponent(setupId)}&gim-member=${encodeURIComponent(member)}`;
+}
+
 // Items that are really one item in different forms. They share a single limit, and a setup can
 // transform one form into another from the right-click menu. The Purging staff and Scorching bow
 // are both made from a Tormented synapse and can be turned back into one, and a loose synapse can
@@ -340,6 +349,18 @@ export class GearPage extends BaseElement {
       );
     } catch {
       this.setStatus("Couldn't copy the tag tab to the clipboard", true);
+    }
+  }
+
+  // Opens a member's loadout in the sim in a new tab. The sim reads the saved setup, so unsaved
+  // edits don't go with it.
+  openInSim(member) {
+    const setup = this.currentSetup;
+    const loadout = this.loadoutFor(member);
+    if (setup?.id == null || !loadout || isEmptyLoadout(loadout)) return;
+    window.open(simLoadoutUrl(setup.id, member), "_blank", "noopener");
+    if (this.dirtySetupIds.has(setup.id)) {
+      this.setStatus("The sim opened the last saved version. Save to include your changes.");
     }
   }
 
@@ -854,6 +875,8 @@ export class GearPage extends BaseElement {
       this.copySetupLink();
     } else if (action === "export-tag-tab") {
       this.copyTagTab(target.getAttribute("data-member"), target.hasAttribute("data-zigzag"));
+    } else if (action === "open-in-sim") {
+      this.openInSim(target.getAttribute("data-member"));
     } else if (action === "export-menu") {
       this.openExportMenu(target);
     } else if (action === "hide-member") {
@@ -1269,9 +1292,16 @@ export class GearPage extends BaseElement {
         const loadout = setup.members[name] || emptyLoadout();
         const escapedName = utility.escapeHtml(name);
         const editing = name === this.selectedMember && this.selection ? "gear-page__overview-card--editing" : "";
+        // Only a saved setup's loadouts can be opened in the sim
+        const simButton =
+          setup.id != null && !isEmptyLoadout(loadout)
+            ? `<button class="men-button small" type="button" data-action="open-in-sim" data-member="${escapedName}"
+                draggable="false" title="Open ${escapedName}'s saved loadout in the sim in a new tab">Open in sim</button>`
+            : "";
         return `<div class="gear-page__overview-card ${editing} rsborder rsbackground" data-member="${escapedName}">
           <div class="gear-page__overview-head" draggable="true" title="Drag to reorder">
             <h3>${escapedName}</h3>
+            ${simButton}
           </div>
           <div class="equipment">${this.equipmentHtml(loadout, used, name)}</div>
           <div class="gear-page__inventory">
